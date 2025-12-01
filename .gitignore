@@ -1,3 +1,7 @@
+# Lightning-Node Gitignore
+# CEU PASS Atmospheric Telemetry Node
+# Raspberry Pi AS3935 + Bluesky Lightning Reporter
+# -----------------------------------------------
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
