@@ -1,2 +1,42 @@
-# Lightning-Node
-Lightning detection project for Raspberry Pi using the AS3935 sensor. Includes bilingual alerts, JSON telemetry logs, CEU PASS node metadata, and automatic Bluesky posting with optional storm summary charts.
+# 🌩️ Lightning Node (Raspberry Pi + AS3935 + Bluesky)
+
+Lightning detection project for Raspberry Pi using the **AS3935** sensor.  
+Includes bilingual alerts (English + French), JSON telemetry logs, CEU PASS node
+metadata, and automatic Bluesky posting with optional storm summary charts.
+
+---
+
+## ⚡ Features
+
+- Real-time lightning strike detection using the AS3935 (I²C)
+- Distance reported in **kilometers and miles**
+- Bilingual console and log messages (**EN / FR**)
+- Automatic posting to **Bluesky** using `atproto`
+- Per-strike text logging to `lightning_alerts.log`
+- Structured JSON telemetry to `lightning_telemetry.jsonl`
+- CEU-style PASS node identity:
+  - Node ID (e.g., `PASS-LN-01`)
+  - Region label (e.g., `Greater Harmony Hills`)
+  - Channel label (e.g., `Atmospheric Telemetry`)
+- Optional PNG chart of storm activity (`storm_summary.png`)
+  - Uploaded to Bluesky with the storm summary
+
+---
+
+## 🧱 Hardware
+
+- Raspberry Pi (Zero / 3 / 4 / 5)
+- AS3935 lightning sensor module (I²C version)
+- Jumper wires
+- Optional: E-ink display HAT for a local PASS dashboard
+
+---
+
+## 🔧 Software Requirements
+
+Install on the Raspberry Pi:
+
+```bash
+sudo apt update
+sudo apt install python3 python3-pip python3-rpi.gpio python3-matplotlib -y
+pip3 install atproto RPi-AS3935
