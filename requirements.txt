@@ -1,1 +1,5 @@
-
+RPi.GPIO
+RPi-AS3935
+atproto
+matplotlib
+configparser
