@@ -17,6 +17,7 @@ from error_handler import init_logging, handle_error, warn
 import math
 import json
 
+
 from datetime import datetime, timedelta
 # ...
 # ---------- Bluesky rate limiter ----------
@@ -176,26 +177,51 @@ def log_json(event: dict):
         print(f"[JSON log error] {e}")
 
 
-def post_bluesky(text, image_path: str = None):
+def def post_bluesky(text, image_path: str = None):
     """
     Post a message to Bluesky using atproto Client.
     If image_path is provided, attach the PNG chart as an embedded image.
+
+    Now includes:
+    - Credential checks with clear warnings
+    - Rate limiting so storms don't spam Bluesky
+    - Centralized error handling via error_handler.py
     """
+    handle = BLUESKY_HANDLE
+    app_pw = BLUESKY_APP_PASSWORD
+
+    # 1) Check credentials first
+    if not (handle and app_pw):
+        warn(
+            "Missing BLUESKY_HANDLE or BLUESKY_APP_PASSWORD – skipping Bluesky post.",
+            context="Bluesky credentials",
+        )
+        return
+
+    # 2) Rate limiting
+    allowed, reason = RATE_LIMITER.can_post()
+    if not allowed:
+        # Soft failure: we just skip this post and log/print the reason
+        warn(reason, context="Bluesky rate limit")
+        return
+
+    # 3) Attempt the post
     try:
-        handle = BLUESKY_HANDLE
-        app_pw = BLUESKY_APP_PASSWORD
-
-        if not (handle and app_pw):
-            print('[Bluesky] Skipped – missing BLUESKY_HANDLE or BLUESKY_APP_PASSWORD.')
-            return
-
         client = Client()
         client.login(handle, app_pw)
 
         if image_path:
             # Read image bytes
-            with open(image_path, 'rb') as f:
-                img_bytes = f.read()
+            try:
+                with open(image_path, "rb") as f:
+                    img_bytes = f.read()
+            except FileNotFoundError as e:
+                # More specific context if the image is missing
+                handle_error(
+                    e,
+                    context=f"opening image file for Bluesky post: {image_path}",
+                )
+                return
 
             # Upload as blob
             blob_output = client.upload_blob(img_bytes)
@@ -204,21 +230,21 @@ def post_bluesky(text, image_path: str = None):
             embed = models.AppBskyEmbedImages.Main(
                 images=[
                     models.AppBskyEmbedImages.Image(
-                        alt='Lightning storm summary chart',
+                        alt="Lightning storm summary chart",
                         image=blob_output.blob,
                     )
                 ]
             )
 
             client.send_post(text=text, embed=embed)
-            print(f'[Bluesky] Posted with image: {image_path}')
+            print(f"[Bluesky] Posted with image: {image_path}")
         else:
             client.send_post(text=text)
-            print('[Bluesky] Posted (text-only).')
+            print("[Bluesky] Posted (text-only).")
 
     except Exception as e:
-        print(f'[Bluesky] error! {e}')
-
+        # Non-fatal: log nicely but don't crash the whole lightning loop
+        handle_error(e, context="posting to Bluesky")
 
 def send_tweet(message: str):
     """
