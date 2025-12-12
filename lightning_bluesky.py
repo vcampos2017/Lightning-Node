@@ -13,8 +13,10 @@ import json
 from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Tuple, Optional
+
 from error_handler import init_logging, handle_error, warn
-# ...
+
 # ---------- Bluesky rate limiter ----------
 
 class BlueskyRateLimiter:
@@ -30,7 +32,7 @@ class BlueskyRateLimiter:
         self.max_per_hour = max_per_hour
         self.post_times = []  # list of datetime objects
 
-    def can_post(self) -> tuple[bool, str | None]:
+    def can_post(self) -> Tuple[bool, Optional[str]]:
         now = datetime.utcnow()
 
         # Keep only posts from the last hour
@@ -44,16 +46,21 @@ class BlueskyRateLimiter:
                 wait_seconds = int((self.min_interval - since_last).total_seconds())
                 return (
                     False,
-                    f"Rate limit: last Bluesky post was {int(since_last.total_seconds())}s ago; "
-                    f"waiting another ~{wait_seconds}s before posting again.",
+                    (
+                        f"Rate limit: last Bluesky post was "
+                        f"{int(since_last.total_seconds())}s ago; "
+                        f"waiting another ~{wait_seconds}s before posting again."
+                    ),
                 )
 
         # Check hourly cap
         if len(self.post_times) >= self.max_per_hour:
             return (
                 False,
-                f"Rate limit: reached {self.max_per_hour} posts in the last hour. "
-                "Skipping this lightning event to avoid spamming Bluesky.",
+                (
+                    f"Rate limit: reached {self.max_per_hour} posts in the last hour. "
+                    "Skipping this lightning event to avoid spamming Bluesky."
+                ),
             )
 
         # Approved; record post time
@@ -66,8 +73,6 @@ RATE_LIMITER = BlueskyRateLimiter(
     min_interval_seconds=300,   # 5 minutes between posts
     max_per_hour=20             # safety cap
 )
-
-from error_handler import init_logging, handle_error, warn
 
 # Initialize logging for the app
 init_logging()
@@ -114,6 +119,7 @@ except Exception as e:
 NODE_ID = "PASS-LN-01"                    # Lightning Node ID
 NODE_REGION = "Greater Harmony Hills"     # Human-readable region
 NODE_CHANNEL = "Atmospheric Telemetry"    # “subchannel” label
+
 # ---------- Startup banner ----------
 
 def print_startup_banner() -> None:
@@ -240,6 +246,7 @@ def post_bluesky(text, image_path: str = None):
     except Exception as e:
         # Non-fatal: log nicely but don't crash the whole lightning loop
         handle_error(e, context="posting to Bluesky")
+
 
 def send_tweet(message: str):
     """
@@ -454,7 +461,6 @@ def maybe_handle_storm_summary():
 # ---------------- Interrupt Handler ----------------
 def handle_interrupt(channel):
     global STORM_ACTIVE, STORM_START, STORM_END
-    current_timestamp = datetime.now()
     time.sleep(0.003)
     reason = sensor.get_interrupt()
     now = time.time()
