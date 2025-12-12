@@ -11,20 +11,69 @@ import configparser
 from datetime import datetime
 from pathlib import Path
 from collections import deque
+import os
+import configparser
+from error_handler import init_logging, handle_error, warn
 import math
 import json
 
-# Code for loading Bluesky credentials
-config = configparser.ConfigParser()
-config.read(os.path.expanduser("~/.bluesky.ini"))
+# Initialize logging for the app
+init_logging()
 
-BLUESKY_HANDLE = config["bluesky"]["handle"]
-BLUESKY_APP_PASSWORD = config["bluesky"]["app_password"]
+# ---------- Bluesky credentials loading ----------
+
+CONFIG_PATH = os.path.expanduser("~/.bluesky_credentials.ini")
+
+try:
+    if not os.path.exists(CONFIG_PATH):
+        raise FileNotFoundError(
+            f"Credentials file not found at {CONFIG_PATH}."
+        )
+
+    config = configparser.ConfigParser()
+    read_files = config.read(CONFIG_PATH)
+
+    if not read_files:
+        raise ValueError(
+            f"Unable to read credentials file at {CONFIG_PATH}."
+        )
+
+    if "bluesky" not in config:
+        raise KeyError(
+            "Missing [bluesky] section in credentials file."
+        )
+
+    BLUESKY_HANDLE = config["bluesky"].get("handle", "").strip()
+    BLUESKY_APP_PASSWORD = config["bluesky"].get("app_password", "").strip()
+
+    if not BLUESKY_HANDLE or not BLUESKY_APP_PASSWORD:
+        raise ValueError(
+            "Both 'handle' and 'app_password' must be set in the [bluesky] section."
+        )
+
+except Exception as e:
+    handle_error(
+        e,
+        context=f"loading Bluesky credentials from {CONFIG_PATH}",
+        fatal=True,
+    )
 
 # ---------- CEU / PASS Node Identity ----------
 NODE_ID = "PASS-LN-01"                    # Lightning Node ID
 NODE_REGION = "Greater Harmony Hills"     # Human-readable region
 NODE_CHANNEL = "Atmospheric Telemetry"    # “subchannel” label
+# ---------- Startup banner ----------
+
+def print_startup_banner() -> None:
+    """Print a one-time startup summary so we know what node is running."""
+    print("\n================ LightningSensorBluesky ================")
+    print(f" Node ID     : {NODE_ID}")
+    print(f" Region      : {NODE_REGION}")
+    print(f" Channel     : {NODE_CHANNEL}")
+    print(f" Bluesky     : {BLUESKY_HANDLE}")
+    print(" Log file    : lightning_bluesky.log")
+    print(" Status      : Starting up and listening for lightning...")
+    print("=======================================================\n")
 
 # Status icons for fun + quick scanning
 STATUS_IDLE = "🟢"
