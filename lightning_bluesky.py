@@ -8,17 +8,12 @@ import os
 import time
 import threading
 import configparser
-from datetime import datetime
-from pathlib import Path
-from collections import deque
-import os
-import configparser
-from error_handler import init_logging, handle_error, warn
 import math
 import json
-
-
+from collections import deque
 from datetime import datetime, timedelta
+from pathlib import Path
+from error_handler import init_logging, handle_error, warn
 # ...
 # ---------- Bluesky rate limiter ----------
 
@@ -33,7 +28,7 @@ class BlueskyRateLimiter:
     def __init__(self, min_interval_seconds: int = 300, max_per_hour: int = 20):
         self.min_interval = timedelta(seconds=min_interval_seconds)
         self.max_per_hour = max_per_hour
-        self.post_times: list[datetime] = []
+        self.post_times = []  # list of datetime objects
 
     def can_post(self) -> tuple[bool, str | None]:
         now = datetime.utcnow()
@@ -177,7 +172,7 @@ def log_json(event: dict):
         print(f"[JSON log error] {e}")
 
 
-def def post_bluesky(text, image_path: str = None):
+def post_bluesky(text, image_path: str = None):
     """
     Post a message to Bluesky using atproto Client.
     If image_path is provided, attach the PNG chart as an embedded image.
@@ -557,6 +552,8 @@ def handle_interrupt(channel):
 GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 sensor.set_mask_disturber(False)
 GPIO.add_event_detect(pin, GPIO.RISING, callback=handle_interrupt)
+
+print_startup_banner()
 
 send_line(
     f"{STATUS_IDLE} System ready. Listening for lightning strikes... "
