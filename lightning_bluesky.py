@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# lightning_tweeter_bluesky_bilingual_FIXED.py
 # Bilingual lightning alerts (EN/FR) with screen print, log file, and optional Bluesky posting.
 # Now with CEU-style PASS node metadata, per-strike Bluesky posts, & post-storm summaries.
 
