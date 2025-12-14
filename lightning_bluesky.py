@@ -9,72 +9,25 @@ import threading
 import configparser
 import math
 import json
+from bluesky_post_controller import BlueskyPostController
 from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Tuple, Optional
-
 from error_handler import init_logging, handle_error, warn
-
-# ---------- Bluesky rate limiter ----------
-
-class BlueskyRateLimiter:
-    """
-    Prevents posting too frequently to Bluesky.
-
-    - min_interval_seconds: minimum time between posts
-    - max_per_hour: hard cap on posts in any rolling 60-minute window
-    """
-
-    def __init__(self, min_interval_seconds: int = 300, max_per_hour: int = 20):
-        self.min_interval = timedelta(seconds=min_interval_seconds)
-        self.max_per_hour = max_per_hour
-        self.post_times = []  # list of datetime objects
-
-    def can_post(self) -> Tuple[bool, Optional[str]]:
-        now = datetime.utcnow()
-
-        # Keep only posts from the last hour
-        one_hour_ago = now - timedelta(hours=1)
-        self.post_times = [t for t in self.post_times if t >= one_hour_ago]
-
-        # Check minimum spacing between posts
-        if self.post_times:
-            since_last = now - self.post_times[-1]
-            if since_last < self.min_interval:
-                wait_seconds = int((self.min_interval - since_last).total_seconds())
-                return (
-                    False,
-                    (
-                        f"Rate limit: last Bluesky post was "
-                        f"{int(since_last.total_seconds())}s ago; "
-                        f"waiting another ~{wait_seconds}s before posting again."
-                    ),
-                )
-
-        # Check hourly cap
-        if len(self.post_times) >= self.max_per_hour:
-            return (
-                False,
-                (
-                    f"Rate limit: reached {self.max_per_hour} posts in the last hour. "
-                    "Skipping this lightning event to avoid spamming Bluesky."
-                ),
-            )
-
-        # Approved; record post time
-        self.post_times.append(now)
-        return True, None
-
-
-# Global limiter instance for this process
-RATE_LIMITER = BlueskyRateLimiter(
-    min_interval_seconds=300,   # 5 minutes between posts
-    max_per_hour=20             # safety cap
-)
 
 # Initialize logging for the app
 init_logging()
+
+POST_CONTROLLER = BlueskyPostController(
+    state_path="posting_state.json",
+    startup_grace_s=15 * 60,
+    max_per_15m=1,
+    max_per_hour=3,
+    max_per_day=10,
+    dedupe_window_s=20 * 60,
+    dry_run=True,   # safe while testing
+)
 
 # ---------- Bluesky credentials loading ----------
 
@@ -200,7 +153,7 @@ def post_bluesky(text, image_path: str = None):
 
     # 2) Post gating (prevents spam, survives restarts)
     # Use a simple heuristic to separate strike posts from storm summary posts.
-    dedupe_key = "storm_summary" if ("Storm summary" in text or "Storm session" in text) else "lightning"
+    dedupe_key = "storm_summary" if image_path else "lightning"
     event = {
         "type": "bluesky_post",
         "timestamp": int(time.time()),
