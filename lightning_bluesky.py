@@ -184,7 +184,7 @@ def post_bluesky(text, image_path: str = None):
 
     Now includes:
     - Credential checks with clear warnings
-    - Rate limiting so storms don't spam Bluesky
+    - Post gating (startup grace, rate limits, dedupe) via BlueskyPostController
     - Centralized error handling via error_handler.py
     """
     handle = BLUESKY_HANDLE
@@ -198,11 +198,21 @@ def post_bluesky(text, image_path: str = None):
         )
         return
 
-    # 2) Rate limiting
-    allowed, reason = RATE_LIMITER.can_post()
-    if not allowed:
-        # Soft failure: we just skip this post and log/print the reason
-        warn(reason, context="Bluesky rate limit")
+    # 2) Post gating (prevents spam, survives restarts)
+    # Use a simple heuristic to separate strike posts from storm summary posts.
+    dedupe_key = "storm_summary" if ("Storm summary" in text or "Storm session" in text) else "lightning"
+    event = {
+        "type": "bluesky_post",
+        "timestamp": int(time.time()),
+        "dedupe_key": dedupe_key,
+    }
+
+    decision = POST_CONTROLLER.should_post(event)
+    if not decision.allow:
+        warn(
+            f"Suppressed: {decision.reason} (retry_after={decision.retry_after_s}s)",
+            context="Bluesky post controller",
+        )
         return
 
     # 3) Attempt the post
@@ -216,7 +226,6 @@ def post_bluesky(text, image_path: str = None):
                 with open(image_path, "rb") as f:
                     img_bytes = f.read()
             except FileNotFoundError as e:
-                # More specific context if the image is missing
                 handle_error(
                     e,
                     context=f"opening image file for Bluesky post: {image_path}",
@@ -237,13 +246,14 @@ def post_bluesky(text, image_path: str = None):
             )
 
             client.send_post(text=text, embed=embed)
+            POST_CONTROLLER.record_post(event)
             print(f"[Bluesky] Posted with image: {image_path}")
         else:
             client.send_post(text=text)
+            POST_CONTROLLER.record_post(event)
             print("[Bluesky] Posted (text-only).")
 
     except Exception as e:
-        # Non-fatal: log nicely but don't crash the whole lightning loop
         handle_error(e, context="posting to Bluesky")
 
 
