@@ -11,13 +11,14 @@ import math
 import json
 from bluesky_post_controller import BlueskyPostController
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Tuple, Optional
 from error_handler import init_logging, handle_error, warn
 
 # Initialize logging for the app
 init_logging()
+
+STATE_PATH = Path(__file__).resolve().parent / "posting_state.json"
 
 POST_CONTROLLER = BlueskyPostController(
     state_path="posting_state.json",
