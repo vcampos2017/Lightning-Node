@@ -10,11 +10,29 @@ Key signals:
 1) Active NWS alerts affecting the location (strongest).
 2) Hourly forecast mentions thunderstorms in the next N hours (anticipatory).
 
-Usage:
+Usage (recommended: keep location out of git-tracked files):
+    import os
     from noaa_check import NOAAStormChecker, NOAAConfig
-    checker = NOAAStormChecker(NOAAConfig(user_agent="LightningDetector/1.0 (you@example.com)"))
-    result = checker.check_storm_plausibility(lat=29.57, lon=-98.48)
-    print(result)
+
+    checker = NOAAStormChecker(
+        NOAAConfig(user_agent=os.environ["NOAA_USER_AGENT"])
+    )
+
+    lat = float(os.environ["NOAA_LAT"])
+    lon = float(os.environ["NOAA_LON"])
+
+    result = checker.check_storm_plausibility(lat=lat, lon=lon)
+    print(result.to_dict())
+
+Environment variables:
+- NOAA_USER_AGENT: e.g., "LightningDetector/1.0 (contact@example.com)"
+- NOAA_LAT: latitude (float)
+- NOAA_LON: longitude (float)
+
+Notes:
+- Respect NWS guidance: always send a descriptive User-Agent with contact info.
+- This module is designed to be called on-demand (e.g., when your sensor triggers),
+  not polled continuously.
 """
 
 from __future__ import annotations
@@ -35,7 +53,7 @@ class NOAAConfig:
     """
     user_agent: REQUIRED by NWS policy; include an email or URL for contact.
     timeout_s:  reasonable network timeout.
-    thunder_keywords: keywords used to identify thunder in shortForecast.
+    thunder_keywords: keywords used to identify thunder in shortForecast/detailedForecast.
     forecast_hours_ahead: look-ahead window for hourly forecast scan.
     """
     user_agent: str
@@ -45,8 +63,8 @@ class NOAAConfig:
         "thunderstorm", "t-storm", "tstorm", "thunder",
     )
 
-    # Which alert event names should count as storm-positive.
-    # You can tune this list.
+    # Alert event names that count as "storm-positive".
+    # Tune this list to your needs.
     alert_event_whitelist: Tuple[str, ...] = (
         "Severe Thunderstorm Warning",
         "Severe Thunderstorm Watch",
@@ -64,7 +82,7 @@ class NOAAConfig:
 class NOAAStormResult:
     """
     storm_positive: final gate result.
-    score: optional heuristic score (higher = stronger corroboration).
+    score: heuristic score (higher = stronger corroboration).
     reasons: human-readable reasons for the decision.
     alerts: subset of alert details that triggered/appeared.
     forecast_hits: forecast periods that matched thunder keywords.
@@ -96,25 +114,28 @@ class NOAAStormChecker:
     BASE = "https://api.weather.gov"
 
     def __init__(self, config: NOAAConfig) -> None:
-        if not config.user_agent or "@" not in config.user_agent and "http" not in config.user_agent:
-            # NWS asks for a valid UA with contact info; this is a soft check.
+        # Soft validation: NWS asks for a UA with contact info. Encourage good hygiene.
+        if not config.user_agent or (("@" not in config.user_agent) and ("http" not in config.user_agent)):
             raise ValueError(
                 "NOAAConfig.user_agent must include contact info, e.g. "
-                "'LightningDetector/1.0 (you@example.com)'."
+                "'LightningDetector/1.0 (contact@example.com)'."
             )
+
         self.config = config
         self._session = requests.Session()
         self._session.headers.update({
             "User-Agent": self.config.user_agent,
             "Accept": "application/geo+json, application/json",
         })
-        # Simple in-memory cache for points lookups
+
+        # Simple in-memory cache for points lookups (per rounded lat/lon).
         self._points_cache: Dict[str, Dict[str, Any]] = {}
 
     def check_storm_plausibility(self, lat: float, lon: float) -> NOAAStormResult:
         """
-        Main entry point:
-        Returns storm_positive True if alerts indicate storms OR forecast indicates thunder soon.
+        Returns storm_positive True if:
+        - Storm-related NWS alerts are active for the point, OR
+        - Hourly forecast mentions thunder within forecast_hours_ahead.
         """
         fetched_at = datetime.now(timezone.utc).isoformat()
 
@@ -137,15 +158,21 @@ class NOAAStormChecker:
         # 2) Hourly forecast thunder keywords (anticipatory corroboration)
         hourly_url = points.get("properties", {}).get("forecastHourly")
         if hourly_url:
-            hits = self._scan_hourly_forecast_for_thunder(hourly_url, hours_ahead=self.config.forecast_hours_ahead)
+            hits = self._scan_hourly_forecast_for_thunder(
+                hourly_url,
+                hours_ahead=self.config.forecast_hours_ahead
+            )
             if hits:
                 forecast_hits = hits
                 score += 1
-                reasons.append(f"Hourly forecast mentions thunder within {self.config.forecast_hours_ahead}h.")
+                reasons.append(
+                    f"Hourly forecast mentions thunder within {self.config.forecast_hours_ahead}h."
+                )
         else:
             reasons.append("No forecastHourly URL available from /points response.")
 
-        storm_positive = (score >= 2) or (score >= 1 and bool(alerts)) or bool(alerts) or bool(forecast_hits)
+        # Decision: alerts alone should be sufficient; forecast hits alone is supportive.
+        storm_positive = bool(alerts) or bool(forecast_hits)
 
         if storm_positive:
             reasons.append("NOAA storm plausibility: POSITIVE (storm conditions likely).")
@@ -166,13 +193,15 @@ class NOAAStormChecker:
     # ---------------------------
 
     def _get_points(self, lat: float, lon: float) -> Dict[str, Any]:
+        # Round to reduce cache key churn and avoid storing overly precise location in memory logs.
         key = f"{lat:.4f},{lon:.4f}"
         if key in self._points_cache:
             return self._points_cache[key]
 
         url = f"{self.BASE}/points/{lat:.4f},{lon:.4f}"
         data = self._get_json(url)
-        # Cache the whole response; it's small and stable.
+
+        # Cache response; small and stable.
         self._points_cache[key] = data
         return data
 
@@ -180,7 +209,6 @@ class NOAAStormChecker:
         """
         Uses alerts endpoint filtered by point. Returns raw 'features' items.
         """
-        # The Weather.gov alerts endpoint supports point filtering:
         # /alerts/active?point=lat,lon
         url = f"{self.BASE}/alerts/active"
         params = {"point": f"{lat:.4f},{lon:.4f}"}
@@ -197,7 +225,7 @@ class NOAAStormChecker:
 
         for feat in alert_features:
             props = (feat or {}).get("properties", {}) or {}
-            event = props.get("event", "")
+            event = props.get("event", "") or ""
             if event in wh:
                 out.append({
                     "event": event,
@@ -235,13 +263,13 @@ class NOAAStormChecker:
             if start_dt is None:
                 continue
 
-            # Normalize to UTC if timezone aware; if naive, treat as UTC.
+            # Normalize to UTC if timezone-aware; if naive, treat as UTC.
             if start_dt.tzinfo is None:
                 start_dt = start_dt.replace(tzinfo=timezone.utc)
             start_dt_utc = start_dt.astimezone(timezone.utc)
 
             if start_dt_utc > cutoff:
-                break  # hourly periods are in chronological order
+                break  # periods are in chronological order
 
             text = f"{short_fc} {detailed_fc}".lower()
             if any(k in text for k in keywords):
@@ -257,14 +285,14 @@ class NOAAStormChecker:
     def _get_json(self, url: str, params: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         """
         GET JSON with basic error handling.
+        Returns an empty object with _error fields on failure.
         """
         try:
             resp = self._session.get(url, params=params, timeout=self.config.timeout_s)
             resp.raise_for_status()
             return resp.json()
         except requests.RequestException as e:
-            # Fail "closed" (no storm) by returning empty JSON; caller will treat as negative.
-            # You can replace this with logging to a file or your app's logger.
+            # Fail "closed" (no storm) by returning error info; caller treats as negative.
             return {"_error": str(e), "_url": url, "_params": params or {}}
         except ValueError as e:
             return {"_error": f"Invalid JSON: {e}", "_url": url, "_params": params or {}}
@@ -273,8 +301,8 @@ class NOAAStormChecker:
     def _parse_iso8601(s: Optional[str]) -> Optional[datetime]:
         if not s:
             return None
-        # Python 3.11+ datetime.fromisoformat handles offsets like -06:00, but not 'Z' in all cases.
         try:
+            # Handle trailing Z
             if s.endswith("Z"):
                 s = s.replace("Z", "+00:00")
             return datetime.fromisoformat(s)
