@@ -1,3 +1,22 @@
+## Privacy & Sensitive Data Policy
+
+This repository intentionally excludes private or sensitive information.
+
+Do **not** commit:
+- Street addresses or precise physical locations
+- Exact latitude/longitude for private locations
+- API keys, tokens, or credentials
+- Local `.env` files or runtime state containing private data
+
+All location-specific or sensitive values must be supplied at runtime
+(e.g., via environment variables or local, git-ignored config files).
+
+Example:
+```python
+lat = float(os.environ["NOAA_LAT"])
+lon = float(os.environ["NOAA_LON"])
+
+
 # 🌩️ Lightning Node (Raspberry Pi + AS3935 + Bluesky)
 
 Lightning detection project for Raspberry Pi using the **AS3935** sensor.  
