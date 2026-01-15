@@ -1,0 +1,8 @@
+[Unit]
+Description=Notify IFTTT on failure for %i 
+
+[Service]
+Type=oneshot 
+ExecStart=/bin/mkdir -p /var/lib/ifttt_notify
+ExecStart=/bin/sh -c 'date +%s > /var/lib/ifttt_notify/last_failed.ts'
+ExecStart=-/usr/local/bin/ifttt_notify_gate.sh lightning_failed "Lightning Bluesky FAILED: %i" true

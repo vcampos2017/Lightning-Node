@@ -1,0 +1,16 @@
+[Unit]
+Description=Lightning Detector (Bluesky Publisher)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/Lightning-Node
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/pi/Lightning-Node/.venv/bin/python /home/pi/Lightning-Node/lightning_bluesky.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
