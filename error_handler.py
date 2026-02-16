@@ -57,7 +57,7 @@ def handle_error(
 
     # Log error + traceback
     logging.error(base)
-    logging.error("Traceback:\n" + "".join(traceback.format_exception(err)))
+    logging.error("Traceback:\n" + "".join(traceback.format_exception(type(err), err, err.__traceback__)))
 
     # Print a shorter message for journalctl / console
     print(base)
