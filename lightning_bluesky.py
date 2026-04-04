@@ -90,6 +90,7 @@ def load_app_config(config_path: str = CONFIG_PATH):
 
     handle = cfg.get("bluesky", "handle", fallback="").strip()
     app_password = cfg.get("bluesky", "app_password", fallback="").strip()
+    log("Bluesky credentials source: ~/.bluesky_credentials.ini")
 
     if not handle or not app_password:
         raise ValueError(f"Missing handle/app_password in [bluesky] section of {config_path}")
