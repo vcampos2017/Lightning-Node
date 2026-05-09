@@ -19,41 +19,69 @@ import math
 import json
 from collections import deque
 from datetime import datetime
-from pathlib import Path
 from typing import Optional, Tuple
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None
 
 from bluesky_post_controller import BlueskyPostController
-from error_handler import init_logging  # keep existing logging setup
+from error_handler import init_logging
 
-# ---------------- NOAA / NWS plausibility (optional) ----------------
-# Uses api.weather.gov (NOAA/NWS). No API key required, but NOAA requests a proper User-Agent.
-# We intentionally avoid external deps (no requests) and use stdlib urllib.
 import urllib.request
 import urllib.error
 
 HAVE_NOAA = True
 
-# ---------------- Local helpers ----------------
-# ---------------- Local helpers ----------------
+
 def warn(msg: str, context: str = "") -> None:
-    """Compatibility shim: earlier versions used warn(...)."""
     if context:
         logging.warning("[%s] %s", context, msg)
     else:
         logging.warning("%s", msg)
 
+
 def log_exception(err: Exception, context: str = "") -> None:
-    """Log an exception without relying on error_handler.handle_error (which may be broken)."""
     if context:
         logging.exception("ERROR (%s): %s", context, err)
     else:
         logging.exception("ERROR: %s", err)
 
-# ---------------- Configuration ----------------
+
+def get_greenhouse_metrics_safe():
+    """Fetch optional environment metrics from greenhouse-node.
+
+    This is enrichment only. If the greenhouse node is offline or slow,
+    lightning detection and Bluesky posting must continue normally.
+    """
+    try:
+        url = os.getenv("GREENHOUSE_STATUS_URL", "http://greenhouse-pi:5000/status")
+        with urllib.request.urlopen(url, timeout=3) as response:
+            data = json.load(response)
+        return data.get("metrics", {})
+    except Exception as e:
+        warn(f"fetch failed: {e}", context="Greenhouse")
+        return {}
+
+
+def format_environment(metrics):
+    """Format optional greenhouse environmental metrics for compact posts."""
+    if not metrics:
+        return ""
+    try:
+        t = round(metrics.get("air_temperature_c", 0), 1)
+        h = int(round(metrics.get("air_humidity", 0)))
+        p = round(metrics.get("air_pressure_hpa", 0), 1)
+        return f" | 🌡️ {t}°C 💧 {h}% 📉 {p} hPa"
+    except Exception as e:
+        warn(f"format failed: {e}", context="Greenhouse")
+        return ""
+
+
 CONFIG_PATH = os.path.expanduser("~/.bluesky_credentials.ini")
 
+
 def _env_bool(name: str):
-    """Parse an environment variable into bool or None if unset."""
     val = os.getenv(name)
     if val is None:
         return None
@@ -64,18 +92,8 @@ def _env_bool(name: str):
         return False
     return None
 
+
 def load_app_config(config_path: str = CONFIG_PATH):
-    """Load Bluesky creds + app settings from an INI file.
-
-    Expected structure:
-
-    [bluesky]
-    handle = your.handle.bsky.social
-    app_password = xxxx-xxxx-xxxx-xxxx
-
-    [app]
-    dry_run = true|false
-    """
     cfg = configparser.ConfigParser()
     read_files = cfg.read(config_path)
 
@@ -95,7 +113,6 @@ def load_app_config(config_path: str = CONFIG_PATH):
     if not handle or not app_password:
         raise ValueError(f"Missing handle/app_password in [bluesky] section of {config_path}")
 
-    # Safe default: dry-run ON unless explicitly disabled.
     dry_run = True
     if cfg.has_section("app"):
         try:
@@ -103,23 +120,20 @@ def load_app_config(config_path: str = CONFIG_PATH):
         except ValueError:
             dry_run = True
 
-    # Optional env override for quick testing without editing files.
     env_override = _env_bool("LIGHTNING_DRY_RUN")
     if env_override is not None:
         dry_run = env_override
 
     return handle, app_password, dry_run
 
-# Initialize logging for the app (writes to lightning_bluesky.log)
+
 init_logging()
 
-# Mirror logging to stdout so messages appear in `journalctl -u lightning-bluesky`
-# (init_logging() writes to lightning_bluesky.log; systemd captures stdout/stderr).
+
 def _ensure_stdout_logging() -> None:
     root = logging.getLogger()
     root.setLevel(logging.INFO)
 
-    # Avoid duplicate stream handlers if the service restarts.
     for h in list(root.handlers):
         if isinstance(h, logging.StreamHandler) and getattr(h, "stream", None) in (sys.stdout, sys.stderr):
             return
@@ -129,6 +143,7 @@ def _ensure_stdout_logging() -> None:
     sh.setFormatter(logging.Formatter("%(message)s"))
     root.addHandler(sh)
 
+
 _ensure_stdout_logging()
 
 try:
@@ -137,20 +152,18 @@ except Exception as e:
     log_exception(e, context="loading Bluesky credentials / app config")
     sys.exit(1)
 
-# Controller only handles rate limiting/deduping and respects dry_run.
 POST_CONTROLLER = BlueskyPostController(
     state_path="posting_state.json",
     dry_run=DRY_RUN,
 )
 
 print(f"BOOT: dry_run={DRY_RUN!r} type={type(DRY_RUN)}")
-NODE_ID = "PASS-LN-01"                    # Lightning Node ID
-NODE_REGION = "Greater Harmony Hills"     # Human-readable region
-NODE_CHANNEL = "Atmospheric Telemetry"    # “subchannel” label
+NODE_ID = "PASS-LN-01"
+NODE_REGION = "Greater Harmony Hills"
+NODE_CHANNEL = "Atmospheric Telemetry"
 
-# ---------- Startup banner ----------
+
 def print_startup_banner() -> None:
-    """Print a one-time startup summary so we know what node is running."""
     print("\n================ LightningSensorBluesky ================")
     print(f" Node ID     : {NODE_ID}")
     print(f" Region      : {NODE_REGION}")
@@ -160,30 +173,26 @@ def print_startup_banner() -> None:
     print(" Status      : Starting up and listening for lightning...")
     print("=======================================================\n")
 
-# Status icons for fun + quick scanning
+
 STATUS_IDLE = "🟢"
 STATUS_MONITORING = "🟡"
 STATUS_STORM = "🔴"
 
-# ---------- Optional charting ----------
 try:
     import matplotlib
-    matplotlib.use('Agg')
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     HAVE_MATPLOTLIB = True
 except Exception as e:
     HAVE_MATPLOTLIB = False
     print(f"[Warning] matplotlib not available: {e}; charts will not be generated.")
 
-# ---------- GPIO + AS3935 ----------
 import RPi.GPIO as GPIO
 
-# Robust import: avoid "module object is not callable" issues across variants
 AS3935_CLASS = None
 _as3935_import_errors = []
 
 try:
-    # Common packaging
     from RPi_AS3935.RPi_AS3935 import RPi_AS3935 as _AS3935
     AS3935_CLASS = _AS3935
 except Exception as e:
@@ -191,7 +200,6 @@ except Exception as e:
 
 if AS3935_CLASS is None:
     try:
-        # Alternate packaging
         from RPi_AS3935 import RPi_AS3935 as _AS3935
         AS3935_CLASS = _AS3935
     except Exception as e:
@@ -203,10 +211,8 @@ if AS3935_CLASS is None:
 if not callable(AS3935_CLASS):
     raise TypeError(f"AS3935_CLASS resolved to non-callable object: {AS3935_CLASS!r}")
 
-# Use the resolved class name expected later
 RPi_AS3935 = AS3935_CLASS
 
-# ---------- NOAA gate (storm plausibility) ----------
 NOAA_ENABLED = os.getenv("NOAA_ENABLED", "true").strip().lower() in ("1", "true", "yes", "y", "on")
 NOAA_REQUIRED = os.getenv("NOAA_REQUIRED", "true").strip().lower() in ("1", "true", "yes", "y", "on")
 NOAA_USER_AGENT = os.getenv("NOAA_USER_AGENT", "").strip()
@@ -214,7 +220,8 @@ NOAA_LAT = os.getenv("NOAA_LAT", "").strip()
 NOAA_LON = os.getenv("NOAA_LON", "").strip()
 NOAA_CACHE_TTL_S = int(os.getenv("NOAA_CACHE_TTL_S", "600"))
 
-_NOAA_CACHE: Optional[Tuple[float, bool, str]] = None  # (checked_at, ok, reason)
+_NOAA_CACHE: Optional[Tuple[float, bool, str]] = None
+
 
 def _noaa_get_json(url: str, user_agent: str, timeout_s: int = 8) -> dict:
     req = urllib.request.Request(
@@ -228,17 +235,8 @@ def _noaa_get_json(url: str, user_agent: str, timeout_s: int = 8) -> dict:
         data = resp.read().decode("utf-8", errors="replace")
     return json.loads(data)
 
+
 def noaa_storm_plausible() -> Tuple[Optional[bool], str]:
-    """Return (ok, reason)
-
-    ok=True/False if NOAA check performed
-    ok=None if NOAA unavailable/misconfigured/disabled
-
-    Logic:
-      - Fetch /points/{lat},{lon} to discover forecastHourly URL
-      - Fetch forecastHourly and look for thunderstorm keywords in next ~18 hours
-      - Also check active alerts near the point
-    """
     global _NOAA_CACHE
 
     if not NOAA_ENABLED:
@@ -294,7 +292,11 @@ def noaa_storm_plausible() -> Tuple[Optional[bool], str]:
                     break
 
         ok = bool(alert_hit or forecast_hit)
-        reason = "NOAA storm plausibility: POSITIVE (storm signals detected)." if ok else "NOAA storm plausibility: NEGATIVE (no storm signals detected)."
+        reason = (
+            "NOAA storm plausibility: POSITIVE (storm signals detected)."
+            if ok
+            else "NOAA storm plausibility: NEGATIVE (no storm signals detected)."
+        )
         _NOAA_CACHE = (now, ok, reason)
         return ok, reason
 
@@ -303,24 +305,108 @@ def noaa_storm_plausible() -> Tuple[Optional[bool], str]:
     except Exception as e:
         return None, f"NOAA check exception: {e}"
 
-# ---------- Output / logging ----------
-# ---------- Output / logging ----------
-# NOAA gate log throttling (prevents journal spam while still suppressing posts)
+
 NOAA_LOG_COOLDOWN_S = int(os.getenv("NOAA_LOG_COOLDOWN_S", "60"))
 _LAST_NOAA_SUPPRESS_LOG_AT = 0.0
 
+
 def send_line(message: str) -> None:
-    """Print + flush so it appears in journalctl immediately."""
     print(message, flush=True)
 
-# ---------- Posting ----------
-def post_bluesky(text: str, image_path: Optional[str] = None) -> None:
-    """Post to Bluesky, with optional image embed.
 
-    - Uses NOAA plausibility gate (if enabled)
-    - Uses BlueskyPostController for spam control / persistence
-    """
-    # 1) NOAA plausibility gate (prevents false alarms)
+MAX_POSTS_PER_DAY = int(os.getenv("MAX_POSTS_PER_DAY", "4"))
+MIN_POST_INTERVAL_S = int(os.getenv("MIN_POST_INTERVAL_S", str(3 * 60 * 60)))
+CALM_WINDOW_S = int(os.getenv("CALM_WINDOW_S", str(2 * 60 * 60)))
+LOCAL_TIMEZONE = os.getenv("LOCAL_TIMEZONE", "America/Chicago")
+
+POST_STATE = {
+    "day": None,
+    "posts_today": 0,
+    "last_post_ts": 0.0,
+    "storm_opened": False,
+    "calm_posted": False,
+    "last_lightning_ts": 0.0,
+}
+
+
+def reset_day_if_needed() -> None:
+    if ZoneInfo is not None:
+        today = datetime.now(ZoneInfo(LOCAL_TIMEZONE)).strftime("%Y-%m-%d")
+    else:
+        today = datetime.now().strftime("%Y-%m-%d")
+
+    if POST_STATE["day"] != today:
+        POST_STATE.update(
+            {
+                "day": today,
+                "posts_today": 0,
+                "last_post_ts": 0.0,
+                "storm_opened": False,
+                "calm_posted": False,
+                "last_lightning_ts": 0.0,
+            }
+        )
+
+
+def can_post_now(now_ts: float) -> bool:
+    if POST_STATE["posts_today"] >= MAX_POSTS_PER_DAY:
+        return False
+    if POST_STATE["last_post_ts"] and (now_ts - POST_STATE["last_post_ts"] < MIN_POST_INTERVAL_S):
+        return False
+    return True
+
+
+def record_policy_post(now_ts: float, post_type: str) -> None:
+    POST_STATE["posts_today"] += 1
+    POST_STATE["last_post_ts"] = now_ts
+    if post_type == "storm_open":
+        POST_STATE["storm_opened"] = True
+    elif post_type == "calm":
+        POST_STATE["calm_posted"] = True
+
+
+def note_lightning_event(now_ts: float) -> None:
+    reset_day_if_needed()
+    POST_STATE["last_lightning_ts"] = now_ts
+
+
+def classify_lightning_post() -> Optional[str]:
+    now_ts = time.time()
+    reset_day_if_needed()
+
+    if not POST_STATE["storm_opened"]:
+        if can_post_now(now_ts):
+            record_policy_post(now_ts, "storm_open")
+            return "storm_open"
+        return None
+
+    if not POST_STATE["calm_posted"] and can_post_now(now_ts):
+        record_policy_post(now_ts, "followup")
+        return "followup"
+
+    return None
+
+
+def maybe_post_calm_summary() -> None:
+    now_ts = time.time()
+    reset_day_if_needed()
+
+    if not POST_STATE["storm_opened"]:
+        return
+    if POST_STATE["calm_posted"]:
+        return
+    if POST_STATE["last_lightning_ts"] <= 0:
+        return
+    if now_ts - POST_STATE["last_lightning_ts"] < CALM_WINDOW_S:
+        return
+    if not can_post_now(now_ts):
+        return
+
+    record_policy_post(now_ts, "calm")
+    send_tweet("🌤️ Conditions have quieted. No recent lightning has been detected, and weather conditions appear calmer.")
+
+
+def post_bluesky(text: str, image_path: Optional[str] = None) -> None:
     ok, reason = noaa_storm_plausible()
     if ok is False:
         global _LAST_NOAA_SUPPRESS_LOG_AT
@@ -343,7 +429,6 @@ def post_bluesky(text: str, image_path: Optional[str] = None) -> None:
         )
         return
 
-    # 2) Post gating (prevents spam, survives restarts)
     dedupe_key = "storm_summary" if image_path else "lightning"
     event = {
         "type": "bluesky_post",
@@ -359,9 +444,7 @@ def post_bluesky(text: str, image_path: Optional[str] = None) -> None:
         )
         return
 
-    # 3) Attempt the post
     try:
-        # Lazy import: atproto is heavy on Raspberry Pi; only import when we actually post.
         from atproto import Client, models
 
         client = Client()
@@ -397,18 +480,16 @@ def post_bluesky(text: str, image_path: Optional[str] = None) -> None:
     except Exception as e:
         log_exception(e, context="posting to Bluesky")
 
+
 def send_tweet(message: str):
-    """
-    Wrap a message with timestamp + send to text log + async Bluesky.
-    Used for high-level summaries AND per-strike notifications.
-    """
-    ts = f"{datetime.now():%Y-%m-%d %H:%M:%S} — {message}"
+    env_str = format_environment(get_greenhouse_metrics_safe())
+    ts = f"{datetime.now():%Y-%m-%d %H:%M:%S} — {message}{env_str}"
     send_line(ts)
     threading.Thread(target=post_bluesky, args=(ts,), daemon=True).start()
 
-# ---------------- Sensor Setup ----------------
+
 GPIO.setmode(GPIO.BCM)
-pin = 17  # IRQ pin
+pin = 17
 
 sensor = RPi_AS3935(address=0x03, bus=1)
 sensor.set_indoors(False)
@@ -416,8 +497,51 @@ sensor.set_noise_floor(1)
 sensor.calibrate(tun_cap=0x01)
 sensor.set_min_strikes(5)
 
-# ---------------- Storm Tracking ----------------
-STRIKE_HISTORY = deque(maxlen=2000)  # (timestamp, distance_km, energy)
+# ---------------- Rain Gauge Setup ----------------
+# SparkFun / Weather Meter tipping-bucket rain gauge.
+# Disabled by default until hardware is connected.
+RAIN_GAUGE_ENABLED = os.getenv("RAIN_GAUGE_ENABLED", "false").strip().lower() in ("1", "true", "yes", "y", "on")
+RAIN_GPIO_PIN = int(os.getenv("RAIN_GPIO_PIN", "27"))
+RAIN_MM_PER_TIP = float(os.getenv("RAIN_MM_PER_TIP", "0.2794"))
+RAIN_BOUNCETIME_MS = int(os.getenv("RAIN_BOUNCETIME_MS", "500"))
+
+RAIN_TIP_COUNT = 0
+RAIN_LAST_TIP_TS = 0.0
+
+
+def rain_tip_callback(channel):
+    """GPIO callback for rain gauge tipping-bucket closure."""
+    global RAIN_TIP_COUNT, RAIN_LAST_TIP_TS
+    RAIN_TIP_COUNT += 1
+    RAIN_LAST_TIP_TS = time.time()
+    rain_mm = RAIN_TIP_COUNT * RAIN_MM_PER_TIP
+    rain_in = rain_mm / 25.4
+    send_line(
+        f"🌧️ Rain gauge tip detected: tips={RAIN_TIP_COUNT}, "
+        f"rain={rain_mm:.2f} mm ({rain_in:.3f} in)"
+    )
+
+
+def setup_rain_gauge():
+    """Initialize optional rain gauge GPIO input."""
+    if not RAIN_GAUGE_ENABLED:
+        send_line("🌧️ Rain gauge disabled (RAIN_GAUGE_ENABLED=false).")
+        return
+
+    GPIO.setup(RAIN_GPIO_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.add_event_detect(
+        RAIN_GPIO_PIN,
+        GPIO.FALLING,
+        callback=rain_tip_callback,
+        bouncetime=RAIN_BOUNCETIME_MS,
+    )
+    send_line(
+        f"🌧️ Rain gauge enabled on GPIO{RAIN_GPIO_PIN}; "
+        f"{RAIN_MM_PER_TIP} mm/tip, debounce={RAIN_BOUNCETIME_MS} ms."
+    )
+
+
+STRIKE_HISTORY = deque(maxlen=2000)
 
 STORM_ACTIVE = False
 STORM_START = None
@@ -425,63 +549,14 @@ STORM_END = None
 LAST_SUMMARY_POSTED = None
 
 STORM_MIN_STRIKES = 3
-STORM_WINDOW = 10 * 60        # 10 min
-STORM_GAP_TO_END = 20 * 60    # 20 min quiet -> end
-SUMMARY_DELAY = 60 * 60       # 1 hour after last strike
+STORM_WINDOW = 10 * 60
+STORM_GAP_TO_END = 20 * 60
+SUMMARY_DELAY = 60 * 60
 
-SUMMARY_BIN_SIZE = 5 * 60     # 5-minute bins
-
-# ---------------- Notification / quiet-mode controls ----------------
-# Keep collecting strikes, but suppress repetitive outbound posts.
-ALERT_MIN_INTERVAL = 15 * 60      # minimum seconds between lightning alert posts
-QUIET_TRIGGER_COUNT = 5           # if this many strikes happen within QUIET_WINDOW...
-QUIET_WINDOW = 2 * 60             # ...inside this many seconds...
-QUIET_DURATION = 30 * 60          # ...enter quiet mode for this long
-
-LAST_ALERT_AT = 0.0
-QUIET_UNTIL = 0.0
-
-def alerts_quiet_now() -> bool:
-    return time.time() < QUIET_UNTIL
-
-def recent_strike_count(window_s: int = QUIET_WINDOW) -> int:
-    now = time.time()
-    return sum(1 for (t, _, _) in STRIKE_HISTORY if now - t <= window_s)
-
-def should_send_lightning_alert() -> bool:
-    """Decide whether to send an outbound lightning alert.
-
-    Rules:
-    - Always keep recording strikes locally.
-    - If too many recent strikes occur, enter quiet mode.
-    - While quiet mode is active, suppress outbound alerts.
-    - Enforce a minimum interval between outbound alerts.
-    """
-    global LAST_ALERT_AT, QUIET_UNTIL
-
-    now = time.time()
-
-    if recent_strike_count() >= QUIET_TRIGGER_COUNT:
-        if now >= QUIET_UNTIL:
-            QUIET_UNTIL = now + QUIET_DURATION
-            send_line(
-                f"🟡 Quiet mode entered for {QUIET_DURATION // 60} min "
-                f"(burst: {recent_strike_count()} strikes in {QUIET_WINDOW} s)."
-            )
-        return False
-
-    if now < QUIET_UNTIL:
-        return False
-
-    if (now - LAST_ALERT_AT) < ALERT_MIN_INTERVAL:
-        return False
-
-    LAST_ALERT_AT = now
-    return True
+SUMMARY_BIN_SIZE = 5 * 60
 
 
 def current_status_icon() -> str:
-    """Return a status icon based on current storm state."""
     if STORM_ACTIVE:
         return STATUS_STORM
     now = time.time()
@@ -490,16 +565,17 @@ def current_status_icon() -> str:
         return STATUS_MONITORING
     return STATUS_IDLE
 
+
 def record_strike(distance_km: float, energy: int):
-    """Record a strike into history for storm analytics."""
     now = time.time()
     STRIKE_HISTORY.append((now, distance_km, energy))
+
 
 def _get_strikes_during(storm_start, storm_end):
     return [(t, d, e) for (t, d, e) in STRIKE_HISTORY if storm_start <= t <= storm_end]
 
+
 def make_storm_chart(storm_start, storm_end):
-    """Create a PNG chart of strikes per bin during the storm. Returns path or None."""
     if not HAVE_MATPLOTLIB:
         return None
 
@@ -537,20 +613,18 @@ def make_storm_chart(storm_start, storm_end):
     plt.close()
     return out_path
 
+
 def handle_storm_state():
-    """Evaluate storm session start/end + summary posting."""
     global STORM_ACTIVE, STORM_START, STORM_END, LAST_SUMMARY_POSTED
 
     now = time.time()
     recent = [(t, d, e) for (t, d, e) in STRIKE_HISTORY if now - t <= STORM_WINDOW]
 
-    # Start storm if enough strikes in window
     if not STORM_ACTIVE and len(recent) >= STORM_MIN_STRIKES:
         STORM_ACTIVE = True
         STORM_START = recent[0][0]
         send_line(f"{STATUS_STORM} Storm session started at {datetime.fromtimestamp(STORM_START):%Y-%m-%d %H:%M:%S}")
 
-    # End storm if quiet long enough
     if STORM_ACTIVE:
         last_strike_time = STRIKE_HISTORY[-1][0] if STRIKE_HISTORY else now
         if now - last_strike_time >= STORM_GAP_TO_END:
@@ -558,7 +632,6 @@ def handle_storm_state():
             STORM_END = last_strike_time
             send_line(f"{STATUS_MONITORING} Storm session ended at {datetime.fromtimestamp(STORM_END):%Y-%m-%d %H:%M:%S}")
 
-            # Post summary after delay
             if LAST_SUMMARY_POSTED is None or now - LAST_SUMMARY_POSTED >= SUMMARY_DELAY:
                 chart = make_storm_chart(STORM_START, STORM_END)
                 if chart:
@@ -570,15 +643,17 @@ def handle_storm_state():
                     ).start()
                 LAST_SUMMARY_POSTED = now
 
+
 def main_loop():
     print_startup_banner()
+    setup_rain_gauge()
     send_line(f"{STATUS_IDLE} System ready. Listening for lightning strikes... ({NODE_ID} · {NODE_REGION} · {NODE_CHANNEL})")
 
     while True:
         try:
             handle_storm_state()
+            maybe_post_calm_summary()
 
-            # interrupt reason from sensor
             reason = sensor.get_interrupt()
             if reason == 0:
                 pass
@@ -587,16 +662,20 @@ def main_loop():
             elif reason == 4:
                 send_line("🟢 Disturber detected — masking subsequent disturbers.")
             elif reason == 8:
-                # Lightning
                 dist = sensor.get_distance()
                 energy = sensor.get_energy()
                 record_strike(dist, energy)
                 icon = current_status_icon()
+                note_lightning_event(time.time())
 
-                if should_send_lightning_alert():
+                post_kind = classify_lightning_post()
+                if post_kind == "storm_open":
                     send_tweet(
-                        f"{icon} Lightning detected! Energy: {energy} — distance: {dist} km ({dist*0.621371:.1f} mi) | "
-                        f"Éclair détecté ! Puissance : {energy} — distance : {dist} km ({dist*0.621371:.1f} mi)"
+                        f"{icon} Lightning detected. NOAA-supported storm conditions appear active in {NODE_REGION}. Monitoring from {NODE_ID}."
+                    )
+                elif post_kind == "followup":
+                    send_tweet(
+                        f"{icon} Additional lightning detected in {NODE_REGION}. Storm activity appears to be continuing."
                     )
                 else:
                     send_line(
@@ -613,6 +692,7 @@ def main_loop():
         except Exception as e:
             log_exception(e, context="main loop")
             time.sleep(2)
+
 
 if __name__ == "__main__":
     main_loop()
