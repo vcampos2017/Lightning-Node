@@ -483,7 +483,8 @@ def post_bluesky(text: str, image_path: Optional[str] = None) -> None:
 
 def send_tweet(message: str):
     env_str = format_environment(get_greenhouse_metrics_safe())
-    ts = f"{datetime.now():%Y-%m-%d %H:%M:%S} — {message}{env_str}"
+    rain_str = format_rain(get_rain_metrics())
+    ts = f"{datetime.now():%Y-%m-%d %H:%M:%S} — {message}{env_str}{rain_str}"
     send_line(ts)
     threading.Thread(target=post_bluesky, args=(ts,), daemon=True).start()
 
@@ -557,6 +558,13 @@ def get_rain_metrics():
         "rain_last_tip_ts": RAIN_LAST_TIP_TS,
         "rain_last_tip_iso": last_tip_iso,
     }
+
+
+def format_rain(metrics):
+    """Format rain totals only after at least one rain gauge tip."""
+    if not metrics or metrics.get("rain_tip_count", 0) <= 0:
+        return ""
+    return f" | 🌧️ {metrics.get('rain_total_in', 0):.3f} in"
 
 
 STRIKE_HISTORY = deque(maxlen=2000)
