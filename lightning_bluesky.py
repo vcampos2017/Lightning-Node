@@ -541,6 +541,24 @@ def setup_rain_gauge():
     )
 
 
+def get_rain_metrics():
+    """Return current rain gauge counters without requiring hardware to be enabled."""
+    rain_mm = RAIN_TIP_COUNT * RAIN_MM_PER_TIP
+    last_tip_iso = None
+    if RAIN_LAST_TIP_TS:
+        last_tip_iso = datetime.fromtimestamp(RAIN_LAST_TIP_TS).isoformat(timespec="seconds")
+
+    return {
+        "rain_enabled": RAIN_GAUGE_ENABLED,
+        "rain_gpio_pin": RAIN_GPIO_PIN,
+        "rain_tip_count": RAIN_TIP_COUNT,
+        "rain_total_mm": round(rain_mm, 2),
+        "rain_total_in": round(rain_mm / 25.4, 3),
+        "rain_last_tip_ts": RAIN_LAST_TIP_TS,
+        "rain_last_tip_iso": last_tip_iso,
+    }
+
+
 STRIKE_HISTORY = deque(maxlen=2000)
 
 STORM_ACTIVE = False
