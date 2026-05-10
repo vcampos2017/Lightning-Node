@@ -222,3 +222,19 @@ __marimo__/
 # Accidental binaries / scratch outputs
 start_lightning
 start_lightning.s
+
+# Lightning-Node local runtime / backup clutter
+posting_state.json
+posting_state.json.bak
+storm_summary.png
+Edit
+*.bak
+*.save
+*.save.*
+*.patch
+*.broken-*
+lightning_bluesky.pycd.save
+lightning_bluesky.py.broken-greenhouse-*
+*.bak.*
+*.bak_*
+*.bak*
