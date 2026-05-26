@@ -596,6 +596,23 @@ def record_strike(distance_km: float, energy: int):
     now = time.time()
     STRIKE_HISTORY.append((now, distance_km, energy))
 
+    # Persist structured telemetry for Chatty Node ingestion.
+    try:
+        event = {
+            "distance_km": distance_km,
+            "distance_mi": distance_km * 0.621371,
+            "energy": energy,
+            "event": "strike",
+            "node_id": NODE_ID,
+            "region": NODE_REGION,
+            "ts_iso": datetime.utcfromtimestamp(now).isoformat() + "Z",
+            "unix_ts": now,
+        }
+        with open("lightning_telemetry.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(event) + "\n")
+    except Exception as e:
+        log_exception(e, context="write lightning telemetry jsonl")
+
 
 def _get_strikes_during(storm_start, storm_end):
     return [(t, d, e) for (t, d, e) in STRIKE_HISTORY if storm_start <= t <= storm_end]
