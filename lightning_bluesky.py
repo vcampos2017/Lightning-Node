@@ -543,18 +543,44 @@ def setup_rain_gauge():
 
 
 def get_rain_metrics():
-    """Return current rain gauge counters without requiring hardware to be enabled."""
+    """Return rain gauge metrics.
+
+    Prefer the dedicated rain-node API when available. If it is offline,
+    fall back to the local placeholder GPIO counters.
+    """
+    rain_url = os.getenv("RAIN_STATUS_URL", "http://rain-node:5000/status")
+
+    try:
+        with urllib.request.urlopen(rain_url, timeout=3) as response:
+            data = json.load(response)
+
+        return {
+            "rain_source": "rain-node",
+            "rain_enabled": True,
+            "rain_gpio_pin": None,
+            "rain_tip_count": int(data.get("tip_count", 0)),
+            "rain_total_mm": round(float(data.get("rain_mm", 0)), 2),
+            "rain_total_in": round(float(data.get("rain_in", 0)), 3),
+            "rain_rate_mm_hr": round(float(data.get("rate_mm_hr", 0)), 2),
+            "rain_last_tip_ts": None,
+            "rain_last_tip_iso": data.get("timestamp_utc"),
+        }
+    except Exception as e:
+        warn(f"fetch failed: {e}", context="Rain Node")
+
     rain_mm = RAIN_TIP_COUNT * RAIN_MM_PER_TIP
     last_tip_iso = None
     if RAIN_LAST_TIP_TS:
         last_tip_iso = datetime.fromtimestamp(RAIN_LAST_TIP_TS).isoformat(timespec="seconds")
 
     return {
+        "rain_source": "local",
         "rain_enabled": RAIN_GAUGE_ENABLED,
         "rain_gpio_pin": RAIN_GPIO_PIN,
         "rain_tip_count": RAIN_TIP_COUNT,
         "rain_total_mm": round(rain_mm, 2),
         "rain_total_in": round(rain_mm / 25.4, 3),
+        "rain_rate_mm_hr": 0.0,
         "rain_last_tip_ts": RAIN_LAST_TIP_TS,
         "rain_last_tip_iso": last_tip_iso,
     }
