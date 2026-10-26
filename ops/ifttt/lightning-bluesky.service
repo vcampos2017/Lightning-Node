@@ -8,6 +8,9 @@ Type=simple
 User=pi
 WorkingDirectory=/home/pi/Lightning-Node
 Environment=PYTHONUNBUFFERED=1
+# NOAA_LAT / NOAA_LON / NOAA_USER_AGENT etc. (see lightning.env.example).
+# The leading "-" means the service still starts if the file is missing.
+EnvironmentFile=-/home/pi/.bluesky_env
 ExecStart=/home/pi/Lightning-Node/.venv/bin/python /home/pi/Lightning-Node/lightning_bluesky.py
 Restart=on-failure
 RestartSec=5
