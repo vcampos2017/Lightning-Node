@@ -6,7 +6,7 @@ Centralized logging & error handling for LightningSensorBluesky.
 import logging
 import sys
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 _LOGGER_INITIALIZED = False
@@ -27,7 +27,7 @@ def init_logging(log_file: str = "lightning_bluesky.log") -> None:
 
 
 def _timestamp() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def warn(message: str, context: str = "") -> None:

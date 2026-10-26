@@ -1,5 +1,6 @@
-RPi.GPIO
-RPi-AS3935
+# Install into the venv (see INSTALL.md). RPi.GPIO (python3-rpi-lgpio) and
+# matplotlib come from apt and are visible via --system-site-packages.
 atproto
-matplotlib
-configparser
+RPi-AS3935
+smbus2
+requests

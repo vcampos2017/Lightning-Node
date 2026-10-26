@@ -18,7 +18,7 @@ import configparser
 import math
 import json
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Tuple
 try:
     from zoneinfo import ZoneInfo
@@ -211,7 +211,38 @@ if AS3935_CLASS is None:
 if not callable(AS3935_CLASS):
     raise TypeError(f"AS3935_CLASS resolved to non-callable object: {AS3935_CLASS!r}")
 
-RPi_AS3935 = AS3935_CLASS
+
+
+class LightningSensor(AS3935_CLASS):
+    """RPi_AS3935 with fixes for current Raspberry Pi OS.
+
+    - smbus2 requires an explicit length for read_i2c_block_data, which the
+      stock library leaves out. We read registers 0x00-0x08 explicitly, so the
+      installed library no longer needs patching (replaces fix_as3935_lib.sh).
+    - Brief retries on transient I2C errors (e.g. Errno 121 Remote I/O error).
+    """
+
+    I2C_RETRIES = 5
+    I2C_RETRY_DELAY_S = 0.05
+
+    def _retry(self, fn):
+        last_err = None
+        for _ in range(self.I2C_RETRIES):
+            try:
+                return fn()
+            except OSError as e:
+                last_err = e
+                time.sleep(self.I2C_RETRY_DELAY_S)
+        raise last_err
+
+    def read_data(self):
+        self.registers = self._retry(
+            lambda: self.i2cbus.read_i2c_block_data(self.address, 0x00, 9)
+        )
+
+    def set_byte(self, register, value):
+        self._retry(lambda: self.i2cbus.write_byte_data(self.address, register, value))
+
 
 NOAA_ENABLED = os.getenv("NOAA_ENABLED", "true").strip().lower() in ("1", "true", "yes", "y", "on")
 NOAA_REQUIRED = os.getenv("NOAA_REQUIRED", "true").strip().lower() in ("1", "true", "yes", "y", "on")
@@ -219,6 +250,8 @@ NOAA_USER_AGENT = os.getenv("NOAA_USER_AGENT", "").strip()
 NOAA_LAT = os.getenv("NOAA_LAT", "").strip()
 NOAA_LON = os.getenv("NOAA_LON", "").strip()
 NOAA_CACHE_TTL_S = int(os.getenv("NOAA_CACHE_TTL_S", "600"))
+# How many hourly forecast periods to scan for thunder (was a fixed 18 hours).
+NOAA_FORECAST_HOURS = int(os.getenv("NOAA_FORECAST_HOURS", "3"))
 
 _NOAA_CACHE: Optional[Tuple[float, bool, str]] = None
 
@@ -283,7 +316,7 @@ def noaa_storm_plausible() -> Tuple[Optional[bool], str]:
         if forecast_hourly_url:
             fh = _noaa_get_json(forecast_hourly_url, NOAA_USER_AGENT)
             periods = ((fh or {}).get("properties") or {}).get("periods") or []
-            for per in periods[:18]:
+            for per in periods[:NOAA_FORECAST_HOURS]:
                 short_fc = (per.get("shortForecast") or "").lower()
                 detailed_fc = (per.get("detailedForecast") or "").lower()
                 text = f"{short_fc} {detailed_fc}"
@@ -319,105 +352,132 @@ MIN_POST_INTERVAL_S = int(os.getenv("MIN_POST_INTERVAL_S", str(3 * 60 * 60)))
 CALM_WINDOW_S = int(os.getenv("CALM_WINDOW_S", str(2 * 60 * 60)))
 LOCAL_TIMEZONE = os.getenv("LOCAL_TIMEZONE", "America/Chicago")
 
+# Posting policy state.
+# A "storm session" opens with the first lightning post that actually goes out,
+# and closes once no lightning has been detected for CALM_WINDOW_S. Closing the
+# session means the next storm (even later the same day) gets a fresh
+# "storm_open" post instead of a "still continuing" follow-up.
 POST_STATE = {
     "day": None,
     "posts_today": 0,
     "last_post_ts": 0.0,
     "storm_opened": False,
-    "calm_posted": False,
     "last_lightning_ts": 0.0,
 }
+_STATE_LOCK = threading.RLock()
+_POST_LOCK = threading.Lock()  # only one Bluesky post in flight at a time
+
+
+def _today_str() -> str:
+    if ZoneInfo is not None:
+        return datetime.now(ZoneInfo(LOCAL_TIMEZONE)).strftime("%Y-%m-%d")
+    return datetime.now().strftime("%Y-%m-%d")
 
 
 def reset_day_if_needed() -> None:
-    if ZoneInfo is not None:
-        today = datetime.now(ZoneInfo(LOCAL_TIMEZONE)).strftime("%Y-%m-%d")
-    else:
-        today = datetime.now().strftime("%Y-%m-%d")
+    """Reset the daily post counter at local midnight.
 
-    if POST_STATE["day"] != today:
-        POST_STATE.update(
-            {
-                "day": today,
-                "posts_today": 0,
-                "last_post_ts": 0.0,
-                "storm_opened": False,
-                "calm_posted": False,
-                "last_lightning_ts": 0.0,
-            }
-        )
+    Only the counter resets; storm state is left alone so a storm that runs
+    past midnight is not announced as a brand-new storm.
+    """
+    with _STATE_LOCK:
+        today = _today_str()
+        if POST_STATE["day"] != today:
+            POST_STATE["day"] = today
+            POST_STATE["posts_today"] = 0
 
 
-def can_post_now(now_ts: float) -> bool:
-    if POST_STATE["posts_today"] >= MAX_POSTS_PER_DAY:
-        return False
-    if POST_STATE["last_post_ts"] and (now_ts - POST_STATE["last_post_ts"] < MIN_POST_INTERVAL_S):
-        return False
-    return True
+def can_post_now(now_ts: float, ignore_min_interval: bool = False) -> bool:
+    with _STATE_LOCK:
+        if POST_STATE["posts_today"] >= MAX_POSTS_PER_DAY:
+            return False
+        if ignore_min_interval:
+            return True
+        if POST_STATE["last_post_ts"] and (now_ts - POST_STATE["last_post_ts"] < MIN_POST_INTERVAL_S):
+            return False
+        return True
 
 
 def record_policy_post(now_ts: float, post_type: str) -> None:
-    POST_STATE["posts_today"] += 1
-    POST_STATE["last_post_ts"] = now_ts
-    if post_type == "storm_open":
-        POST_STATE["storm_opened"] = True
-    elif post_type == "calm":
-        POST_STATE["calm_posted"] = True
+    """Count a post against the policy. Called only AFTER a post succeeds."""
+    with _STATE_LOCK:
+        reset_day_if_needed()
+        POST_STATE["posts_today"] += 1
+        POST_STATE["last_post_ts"] = now_ts
+        if post_type == "storm_open":
+            POST_STATE["storm_opened"] = True
+
+
+def _close_storm_if_quiet(now_ts: float) -> bool:
+    """Close the storm session if it has been quiet for CALM_WINDOW_S.
+
+    Returns True if a session was just closed.
+    """
+    with _STATE_LOCK:
+        last = POST_STATE["last_lightning_ts"]
+        if POST_STATE["storm_opened"] and last > 0 and (now_ts - last) >= CALM_WINDOW_S:
+            POST_STATE["storm_opened"] = False
+            return True
+        return False
 
 
 def note_lightning_event(now_ts: float) -> None:
-    reset_day_if_needed()
-    POST_STATE["last_lightning_ts"] = now_ts
+    with _STATE_LOCK:
+        POST_STATE["last_lightning_ts"] = now_ts
 
 
-def classify_lightning_post() -> Optional[str]:
-    now_ts = time.time()
-    reset_day_if_needed()
+def classify_lightning_post(now_ts: float) -> Optional[str]:
+    """Decide what kind of post (if any) this strike deserves.
 
-    if not POST_STATE["storm_opened"]:
-        if can_post_now(now_ts):
-            record_policy_post(now_ts, "storm_open")
-            return "storm_open"
-        return None
-
-    if not POST_STATE["calm_posted"] and can_post_now(now_ts):
-        record_policy_post(now_ts, "followup")
-        return "followup"
-
-    return None
+    Does NOT change posting state: the post is only counted once it has
+    actually been published (see record_policy_post). Call this BEFORE
+    note_lightning_event so the quiet-period check sees the previous strike.
+    """
+    with _STATE_LOCK:
+        reset_day_if_needed()
+        _close_storm_if_quiet(now_ts)
+        if not can_post_now(now_ts):
+            return None
+        return "followup" if POST_STATE["storm_opened"] else "storm_open"
 
 
 def maybe_post_calm_summary() -> None:
     now_ts = time.time()
-    reset_day_if_needed()
+    with _STATE_LOCK:
+        reset_day_if_needed()
+        if not _close_storm_if_quiet(now_ts):
+            return
+        # The calm post is the single closing message for a storm. It skips the
+        # minimum gap between posts (CALM_WINDOW_S is shorter than
+        # MIN_POST_INTERVAL_S, so it would almost always be blocked) but still
+        # counts toward MAX_POSTS_PER_DAY.
+        allowed = can_post_now(now_ts, ignore_min_interval=True)
 
-    if not POST_STATE["storm_opened"]:
+    # The storm session is closed either way; the calm post is a single attempt.
+    if not allowed:
+        send_line("🌤️ Storm session closed (calm post skipped: daily post limit reached).")
         return
-    if POST_STATE["calm_posted"]:
-        return
-    if POST_STATE["last_lightning_ts"] <= 0:
-        return
-    if now_ts - POST_STATE["last_lightning_ts"] < CALM_WINDOW_S:
-        return
-    if not can_post_now(now_ts):
-        return
-
-    record_policy_post(now_ts, "calm")
-    send_tweet("🌤️ Conditions have quieted. No recent lightning has been detected, and weather conditions appear calmer.")
+    publish(
+        "🌤️ Conditions have quieted. No recent lightning has been detected, and weather conditions appear calmer.",
+        post_type="calm",
+        noaa_gate=False,  # the calm post makes no lightning claim, so no NOAA corroboration needed
+    )
 
 
-def post_bluesky(text: str, image_path: Optional[str] = None) -> None:
-    ok, reason = noaa_storm_plausible()
-    if ok is False:
-        global _LAST_NOAA_SUPPRESS_LOG_AT
-        now_ts = time.time()
-        if now_ts - _LAST_NOAA_SUPPRESS_LOG_AT >= NOAA_LOG_COOLDOWN_S:
-            warn(f"Suppressed by NOAA gate: {reason}", context="NOAA gate")
-            _LAST_NOAA_SUPPRESS_LOG_AT = now_ts
-        return
-    if ok is None and NOAA_REQUIRED:
-        warn(f"Suppressed (NOAA required but unavailable): {reason}", context="NOAA gate")
-        return
+def post_bluesky(text: str, image_path: Optional[str] = None, noaa_gate: bool = True) -> bool:
+    """Publish to Bluesky. Returns True if the post went out (or would have, in dry run)."""
+    if noaa_gate:
+        ok, reason = noaa_storm_plausible()
+        if ok is False:
+            global _LAST_NOAA_SUPPRESS_LOG_AT
+            now_ts = time.time()
+            if now_ts - _LAST_NOAA_SUPPRESS_LOG_AT >= NOAA_LOG_COOLDOWN_S:
+                warn(f"Suppressed by NOAA gate: {reason}", context="NOAA gate")
+                _LAST_NOAA_SUPPRESS_LOG_AT = now_ts
+            return False
+        if ok is None and NOAA_REQUIRED:
+            warn(f"Suppressed (NOAA required but unavailable): {reason}", context="NOAA gate")
+            return False
 
     handle = BLUESKY_HANDLE
     app_pw = BLUESKY_APP_PASSWORD
@@ -427,7 +487,7 @@ def post_bluesky(text: str, image_path: Optional[str] = None) -> None:
             "Missing BLUESKY_HANDLE or BLUESKY_APP_PASSWORD – skipping Bluesky post.",
             context="Bluesky credentials",
         )
-        return
+        return False
 
     dedupe_key = "storm_summary" if image_path else "lightning"
     event = {
@@ -438,11 +498,15 @@ def post_bluesky(text: str, image_path: Optional[str] = None) -> None:
 
     decision = POST_CONTROLLER.should_post(event)
     if not decision.allow:
+        if decision.reason == "dry_run":
+            # Behave as if posted so dry runs exercise the same storm/calm flow as live mode.
+            send_line(f"[DRY RUN] Would post{' with image' if image_path else ''}: {text}")
+            return True
         warn(
             f"Suppressed: {decision.reason} (retry_after={decision.retry_after_s}s)",
             context="Bluesky post controller",
         )
-        return
+        return False
 
     try:
         from atproto import Client, models
@@ -456,7 +520,7 @@ def post_bluesky(text: str, image_path: Optional[str] = None) -> None:
                     img_bytes = f.read()
             except FileNotFoundError as e:
                 log_exception(e, context=f"opening image file for Bluesky post: {image_path}")
-                return
+                return False
 
             blob_output = client.upload_blob(img_bytes)
 
@@ -476,23 +540,54 @@ def post_bluesky(text: str, image_path: Optional[str] = None) -> None:
             client.send_post(text=text)
             POST_CONTROLLER.record_post(event)
             send_line("[Bluesky] Posted (text-only).")
+        return True
 
     except Exception as e:
         log_exception(e, context="posting to Bluesky")
+        return False
 
 
-def send_tweet(message: str):
-    env_str = format_environment(get_greenhouse_metrics_safe())
-    rain_str = format_rain(get_rain_metrics())
-    ts = f"{datetime.now():%Y-%m-%d %H:%M:%S} — {message}{env_str}{rain_str}"
-    send_line(ts)
-    threading.Thread(target=post_bluesky, args=(ts,), daemon=True).start()
+def _publish_worker(message: str, post_type: Optional[str], image_path: Optional[str], noaa_gate: bool) -> None:
+    if not _POST_LOCK.acquire(blocking=False):
+        warn("Another post is already in progress; skipping this one.", context="Bluesky")
+        return
+    try:
+        if image_path:
+            text = message
+        else:
+            # Optional enrichment from other nodes. Done here (off the main loop)
+            # so slow or offline nodes never delay lightning detection.
+            env_str = format_environment(get_greenhouse_metrics_safe())
+            rain_str = format_rain(get_rain_metrics())
+            text = f"{datetime.now():%Y-%m-%d %H:%M:%S} — {message}{env_str}{rain_str}"
+        send_line(text)
+        if post_bluesky(text, image_path=image_path, noaa_gate=noaa_gate) and post_type:
+            record_policy_post(time.time(), post_type)
+    except Exception as e:
+        log_exception(e, context="publish worker")
+    finally:
+        _POST_LOCK.release()
+
+
+def publish(
+    message: str,
+    post_type: Optional[str] = None,
+    image_path: Optional[str] = None,
+    noaa_gate: bool = True,
+) -> None:
+    """Post in a background thread. post_type ("storm_open" / "followup" / "calm")
+    is counted against the posting policy only if the post succeeds."""
+    threading.Thread(
+        target=_publish_worker,
+        args=(message, post_type, image_path, noaa_gate),
+        daemon=True,
+    ).start()
 
 
 GPIO.setmode(GPIO.BCM)
 pin = 17
 
-sensor = RPi_AS3935(address=0x03, bus=1)
+sensor = LightningSensor(address=0x03, bus=1)
 sensor.set_indoors(False)
 sensor.set_noise_floor(1)
 sensor.calibrate(tun_cap=0x01)
@@ -618,7 +713,8 @@ def current_status_icon() -> str:
     return STATUS_IDLE
 
 
-def record_strike(distance_km: float, energy: int):
+def record_strike(distance_km: Optional[int], energy: int):
+    """Record a strike. distance_km is None when the sensor reports out of range."""
     now = time.time()
     STRIKE_HISTORY.append((now, distance_km, energy))
 
@@ -626,12 +722,12 @@ def record_strike(distance_km: float, energy: int):
     try:
         event = {
             "distance_km": distance_km,
-            "distance_mi": distance_km * 0.621371,
+            "distance_mi": round(distance_km * 0.621371, 1) if distance_km is not None else None,
             "energy": energy,
             "event": "strike",
             "node_id": NODE_ID,
             "region": NODE_REGION,
-            "ts_iso": datetime.utcfromtimestamp(now).isoformat() + "Z",
+            "ts_iso": datetime.fromtimestamp(now, timezone.utc).isoformat().replace("+00:00", "Z"),
             "unix_ts": now,
         }
         with open("lightning_telemetry.jsonl", "a", encoding="utf-8") as f:
@@ -668,18 +764,23 @@ def make_storm_chart(storm_start, storm_end):
         counts.append(len(in_bin))
         energies.append(sum(in_bin) if in_bin else 0)
 
-    plt.figure(figsize=(10, 4))
-    plt.plot(bins, counts, label="Strikes/bin")
-    plt.plot(bins, energies, label="Energy/bin")
-    plt.title("Storm Summary")
-    plt.xlabel("Time")
-    plt.ylabel("Count / Energy")
-    plt.legend()
-    plt.tight_layout()
+    # Strike counts and energy are on very different scales (single digits vs.
+    # hundreds of thousands), so give each its own y-axis.
+    fig, ax_count = plt.subplots(figsize=(10, 4))
+    ax_energy = ax_count.twinx()
+    line_count, = ax_count.plot(bins, counts, color="tab:blue", label="Strikes per 5 min")
+    line_energy, = ax_energy.plot(bins, energies, color="tab:orange", label="Energy per 5 min")
+    ax_count.set_xlabel("Time")
+    ax_count.set_ylabel("Strikes")
+    ax_energy.set_ylabel("Energy (sensor units)")
+    ax_count.set_title(f"Storm Summary — {NODE_REGION} ({NODE_ID})")
+    ax_count.legend(handles=[line_count, line_energy], loc="upper left")
+    fig.autofmt_xdate()
+    fig.tight_layout()
 
     out_path = "storm_summary.png"
-    plt.savefig(out_path)
-    plt.close()
+    fig.savefig(out_path)
+    plt.close(fig)
     return out_path
 
 
@@ -705,11 +806,7 @@ def handle_storm_state():
                 chart = make_storm_chart(STORM_START, STORM_END)
                 if chart:
                     send_line("[Storm] Posting summary chart to Bluesky...")
-                    threading.Thread(
-                        target=post_bluesky,
-                        args=(f"Storm summary for {NODE_REGION} ({NODE_ID})", chart),
-                        daemon=True,
-                    ).start()
+                    publish(f"Storm summary for {NODE_REGION} ({NODE_ID})", image_path=chart)
                 LAST_SUMMARY_POSTED = now
 
 
@@ -717,6 +814,18 @@ def main_loop():
     print_startup_banner()
     setup_rain_gauge()
     send_line(f"{STATUS_IDLE} System ready. Listening for lightning strikes... ({NODE_ID} · {NODE_REGION} · {NODE_CHANNEL})")
+
+    # Make a misconfigured NOAA gate obvious at startup instead of silently
+    # suppressing every lightning post later.
+    noaa_ok, noaa_reason = noaa_storm_plausible()
+    if noaa_ok is None and NOAA_REQUIRED:
+        warn(
+            f"NOAA_REQUIRED=true but the NOAA check is unavailable ({noaa_reason}). "
+            "Lightning posts will be suppressed until this is fixed.",
+            context="NOAA gate",
+        )
+    else:
+        send_line(f"NOAA gate: {noaa_reason}")
 
     while True:
         try:
@@ -731,24 +840,30 @@ def main_loop():
             elif reason == 4:
                 send_line("🟢 Disturber detected — masking subsequent disturbers.")
             elif reason == 8:
-                dist = sensor.get_distance()
+                raw_dist = sensor.get_distance()  # km, or False when out of range
+                dist_km = None if raw_dist is False else raw_dist
+                dist_str = f"{dist_km} km" if dist_km is not None else "out of range"
                 energy = sensor.get_energy()
-                record_strike(dist, energy)
+                record_strike(dist_km, energy)
                 icon = current_status_icon()
-                note_lightning_event(time.time())
 
-                post_kind = classify_lightning_post()
+                now_ts = time.time()
+                post_kind = classify_lightning_post(now_ts)  # before note_lightning_event (see docstring)
+                note_lightning_event(now_ts)
+
                 if post_kind == "storm_open":
-                    send_tweet(
-                        f"{icon} Lightning detected. NOAA-supported storm conditions appear active in {NODE_REGION}. Monitoring from {NODE_ID}."
+                    publish(
+                        f"{icon} Lightning detected. NOAA-supported storm conditions appear active in {NODE_REGION}. Monitoring from {NODE_ID}.",
+                        post_type="storm_open",
                     )
                 elif post_kind == "followup":
-                    send_tweet(
-                        f"{icon} Additional lightning detected in {NODE_REGION}. Storm activity appears to be continuing."
+                    publish(
+                        f"{icon} Additional lightning detected in {NODE_REGION}. Storm activity appears to be continuing.",
+                        post_type="followup",
                     )
                 else:
                     send_line(
-                        f"{icon} Lightning (logged, suppressed): Energy={energy}, distance={dist} km"
+                        f"{icon} Lightning (logged, not posted): Energy={energy}, distance={dist_str}"
                     )
             else:
                 send_line(f"🟡 Unknown interrupt reason: {reason}")
