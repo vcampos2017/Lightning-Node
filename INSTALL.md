@@ -22,6 +22,16 @@ The examples assume the username `pi` and the project folder `~/Lightning-Node`
 | SCL        | Pin 5 (GPIO 3)   |
 | IRQ        | Pin 11 (GPIO 17) |
 
+The Embedded Adventures MOD-1016 labels its power pin VCC and its data pin
+SDA/MOSI; it runs in I²C mode at address `0x03`. `lightning_bluesky.py` reads
+the interrupt over I²C, so IRQ is optional, but if it is wired, keep its bare
+strands well away from the SCL pin next to it: a frayed IRQ wire touching SCL
+garbles the I²C bus and shows up as false "lightning" or I/O errors.
+
+The node keeps running with the sensor unplugged. It reports `sensor: missing`
+to Chatty and picks the sensor back up within a minute once it answers again.
+Tuning settings for noisy spots are in `lightning.env.example`.
+
 ## 2. Enable I²C
 
 ```bash
