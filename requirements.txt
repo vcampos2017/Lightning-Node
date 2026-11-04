@@ -4,3 +4,4 @@ atproto
 RPi-AS3935
 smbus2
 requests
+paho-mqtt

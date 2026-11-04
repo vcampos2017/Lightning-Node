@@ -587,11 +587,127 @@ def publish(
 GPIO.setmode(GPIO.BCM)
 pin = 17
 
-sensor = LightningSensor(address=0x03, bus=1)
-sensor.set_indoors(False)
-sensor.set_noise_floor(1)
-sensor.calibrate(tun_cap=0x01)
-sensor.set_min_strikes(5)
+# ---------------- Sensor tuning ----------------
+# All of these can be set in ~/.bluesky_env. The defaults match what this
+# node has always used, except watchdog/spike rejection, which are raised a
+# little to cut false detections from motors, switching supplies, etc.
+#   AS3935_INDOORS        true for a sensor inside the house (lower gain)
+#   AS3935_NOISE_FLOOR    0-7; higher tolerates a noisier spot (default 1)
+#   AS3935_TUN_CAP        0-15; antenna tuning. MOD-1016 boards ship with a
+#                         value on a sticker or the bag; use that one.
+#   AS3935_MIN_STRIKES    1, 5, 9 or 16 strikes before the first report
+#   AS3935_WATCHDOG       0-15; signal threshold (chip default 2)
+#   AS3935_SPIKE_REJECT   0-15; rejects short spikes (chip default 2)
+#   AS3935_MASK_DISTURBERS true: don't interrupt for man-made disturbers
+AS3935_ADDRESS = int(os.getenv("AS3935_ADDRESS", "0x03"), 0)
+AS3935_INDOORS = (_env_bool("AS3935_INDOORS") or False)
+AS3935_NOISE_FLOOR = int(os.getenv("AS3935_NOISE_FLOOR", "1"))
+AS3935_TUN_CAP = int(os.getenv("AS3935_TUN_CAP", "1"), 0)
+AS3935_MIN_STRIKES = int(os.getenv("AS3935_MIN_STRIKES", "5"))
+AS3935_WATCHDOG = int(os.getenv("AS3935_WATCHDOG", "3"))
+AS3935_SPIKE_REJECT = int(os.getenv("AS3935_SPIKE_REJECT", "3"))
+AS3935_MASK_DISTURBERS = (_env_bool("AS3935_MASK_DISTURBERS") or False)
+SENSOR_RETRY_S = int(os.getenv("AS3935_RETRY_S", "60"))
+SENSOR_MAX_ERRORS = 5  # consecutive read errors before we call it missing
+
+
+def _set_bits(s, register: int, mask: int, value: int) -> None:
+    s.read_data()
+    s.set_byte(register, (s.registers[register] & ~mask & 0xFF) | (value & mask))
+
+
+_SENSOR_WARNED = False
+
+
+def connect_sensor():
+    """Open and configure the AS3935. Returns None if it doesn't answer."""
+    global _SENSOR_WARNED
+    try:
+        s = LightningSensor(address=AS3935_ADDRESS, bus=1)
+        s.read_data()
+        s.set_indoors(AS3935_INDOORS)
+        s.set_noise_floor(AS3935_NOISE_FLOOR)
+        s.calibrate(tun_cap=AS3935_TUN_CAP)
+        s.set_min_strikes(AS3935_MIN_STRIKES)
+        _set_bits(s, 0x01, 0x0F, AS3935_WATCHDOG)      # WDTH
+        _set_bits(s, 0x02, 0x0F, AS3935_SPIKE_REJECT)  # SREJ
+        s.set_mask_disturber(AS3935_MASK_DISTURBERS)
+    except Exception as e:
+        if _SENSOR_WARNED:
+            return None  # already said so; keep the log quiet while it's unplugged
+        _SENSOR_WARNED = True
+        warn(f"AS3935 not answering at 0x{AS3935_ADDRESS:02X} ({e!r}). "
+             f"Running without the sensor; will try again every {SENSOR_RETRY_S}s.",
+             context="sensor")
+        return None
+    _SENSOR_WARNED = False
+    send_line(
+        f"AS3935 ready: indoors={AS3935_INDOORS} noise_floor={AS3935_NOISE_FLOOR} "
+        f"tun_cap={AS3935_TUN_CAP} min_strikes={AS3935_MIN_STRIKES} "
+        f"watchdog={AS3935_WATCHDOG} spike_reject={AS3935_SPIKE_REJECT} "
+        f"mask_disturbers={AS3935_MASK_DISTURBERS}"
+    )
+    return s
+
+
+sensor = connect_sensor()
+
+# ---------------- Node network (MQTT) ----------------
+# Counts for Chatty, kept apart from the Bluesky posting state.
+NET_STATE = {
+    "strikes_today": 0,
+    "last_strike": None,
+    "day": None,
+    "disturbers": deque(maxlen=5000),  # timestamps
+    "noise": deque(maxlen=5000),
+}
+_NET_LOCK = threading.Lock()
+
+
+def _net_roll_day() -> None:
+    today = _today_str()
+    if NET_STATE["day"] != today:
+        NET_STATE["day"] = today
+        NET_STATE["strikes_today"] = 0
+
+
+def net_note(kind: str, distance_km: Optional[int] = None, energy: Optional[int] = None) -> None:
+    now = time.time()
+    with _NET_LOCK:
+        _net_roll_day()
+        if kind == "strike":
+            NET_STATE["strikes_today"] += 1
+            NET_STATE["last_strike"] = {
+                "ts": int(now),
+                "distance_km": distance_km,
+                "distance_mi": round(distance_km * 0.621371, 1) if distance_km is not None else None,
+                "energy": energy,
+            }
+        elif kind in ("disturber", "noise"):
+            NET_STATE["disturbers" if kind == "disturber" else "noise"].append(now)
+
+
+def net_state() -> dict:
+    now = time.time()
+    with _NET_LOCK:
+        _net_roll_day()
+        return {
+            "sensor": "ok" if sensor is not None else "missing",
+            "storm_active": bool(STORM_ACTIVE),
+            "strikes_today": NET_STATE["strikes_today"],
+            "last_strike": NET_STATE["last_strike"],
+            "disturbers_last_hour": sum(1 for t in NET_STATE["disturbers"] if now - t <= 3600),
+            "noise_last_hour": sum(1 for t in NET_STATE["noise"] if now - t <= 3600),
+            "node_id": NODE_ID,
+        }
+
+
+try:
+    from node_mqtt import CheckIn
+    NODE_NET = CheckIn(net_state)
+except Exception as e:  # never let the network stop lightning detection
+    log_exception(e, context="node network")
+    NODE_NET = None
 
 # ---------------- Rain Gauge Setup ----------------
 # SparkFun / Weather Meter tipping-bucket rain gauge.
@@ -827,17 +943,52 @@ def main_loop():
     else:
         send_line(f"NOAA gate: {noaa_reason}")
 
+    global sensor
+    if NODE_NET is not None:
+        NODE_NET.start()
+    if sensor is None:
+        send_line("⚪ No AS3935 sensor right now. Staying online for the node network.")
+    last_sensor_try = time.monotonic()
+    read_errors = 0
+
     while True:
         try:
             handle_storm_state()
             maybe_post_calm_summary()
 
-            reason = sensor.get_interrupt()
+            if sensor is None:
+                if time.monotonic() - last_sensor_try >= SENSOR_RETRY_S:
+                    last_sensor_try = time.monotonic()
+                    sensor = connect_sensor()
+                    if sensor is not None:
+                        send_line("🟢 AS3935 sensor is back.")
+                        if NODE_NET is not None:
+                            NODE_NET.publish_now()
+                time.sleep(1)
+                continue
+
+            try:
+                reason = sensor.get_interrupt()
+                read_errors = 0
+            except OSError as e:
+                read_errors += 1
+                if read_errors >= SENSOR_MAX_ERRORS:
+                    warn(f"AS3935 stopped answering ({e!r}); marking it missing.", context="sensor")
+                    sensor = None
+                    last_sensor_try = time.monotonic()
+                    read_errors = 0
+                    if NODE_NET is not None:
+                        NODE_NET.publish_now()
+                time.sleep(1)
+                continue
+
             if reason == 0:
                 pass
             elif reason == 1:
+                net_note("noise")
                 send_line("🟢 Noise level too high (noise).")
             elif reason == 4:
+                net_note("disturber")
                 send_line("🟢 Disturber detected — masking subsequent disturbers.")
             elif reason == 8:
                 raw_dist = sensor.get_distance()  # km, or False when out of range
@@ -845,6 +996,9 @@ def main_loop():
                 dist_str = f"{dist_km} km" if dist_km is not None else "out of range"
                 energy = sensor.get_energy()
                 record_strike(dist_km, energy)
+                net_note("strike", dist_km, energy)
+                if NODE_NET is not None:
+                    NODE_NET.publish_now()
                 icon = current_status_icon()
 
                 now_ts = time.time()
