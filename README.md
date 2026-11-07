@@ -54,6 +54,28 @@ pip install -r requirements.txt
 
 ---
 
+## 📶 WiFi keeper
+
+`wifi_keeper.py` keeps the node on the best saved WiFi that really reaches the
+internet (the same keeper Chatty uses). Every minute it checks the internet;
+after two misses it tries the other saved networks, strongest first, and if
+none works it reconnects and, every few rounds, switches WiFi off and on. It
+also moves off a weak signal when a saved network is much stronger, leaves WiFi
+alone on a working cable, and turns WiFi power saving off. It works with
+NetworkManager (Bookworm/Trixie) and older wpa_supplicant setups, and never
+reads or prints passwords.
+
+```bash
+bash install_wifi_keeper.sh                 # once: installs node-wifi.service
+sudo python3 wifi_keeper.py --status        # saved networks and signals
+journalctl -u node-wifi -f                  # what it's doing
+```
+
+Settings (all optional) go in `/etc/node-wifi.env`; see the top of `wifi_keeper.py`.
+Tests: `python3 tests/test_wifi_keeper.py`.
+
+---
+
 ## 🔒 Privacy & Sensitive Data Policy
 
 This repository intentionally excludes private or sensitive information.
