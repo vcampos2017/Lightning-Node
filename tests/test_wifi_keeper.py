@@ -11,6 +11,7 @@ sys.modules["wifi_keeper"] = wk
 _spec.loader.exec_module(wk)
 wk.STATUS_FILE = os.path.join(tempfile.mkdtemp(), "wifi.json")
 wk.REBOOT_FILE = os.path.join(tempfile.mkdtemp(), "state", "reboots.json")
+wk.RESTART_LOG = os.path.join(os.path.dirname(wk.REBOOT_FILE), "restarts.log")
 REBOOTS = []
 
 
@@ -370,8 +371,9 @@ def test_never_touches_password_files():
 
 def _fresh_reboots():
     REBOOTS.clear()
-    if os.path.exists(wk.REBOOT_FILE):
-        os.remove(wk.REBOOT_FILE)
+    for p in (wk.REBOOT_FILE, wk.RESTART_LOG):
+        if os.path.exists(p):
+            os.remove(p)
 
 
 def test_restarts_after_long_offline_when_router_is_gone():
@@ -386,6 +388,9 @@ def test_restarts_after_long_offline_when_router_is_gone():
     assert "restarting" in results
     assert results.index("restarting") >= 29         # not before 30 minutes
     assert len(REBOOTS) == 1                         # then waits another 30 min
+    with open(wk.RESTART_LOG) as f:
+        entry = f.read().splitlines()[-1]
+    assert "offline 30 min" in entry and "wlan0" in entry and "AVC-2G" in entry
 
 
 def test_never_restarts_more_than_the_daily_cap():

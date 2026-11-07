@@ -65,7 +65,9 @@ alone on a working cable, and turns WiFi power saving off. As a last resort,
 after 30 minutes offline with the home router not answering either, it restarts
 the Pi (at most 3 times a day; never when only the internet is down). The
 installer also turns on the Pi's hardware watchdog, so a frozen Pi restarts
-itself after about 15 seconds. It works with
+itself after about 15 seconds, and keeps the system log across restarts. Each
+restart is noted with what the Pi saw just before in
+`/var/lib/node-wifi/restarts.log` (also shown by `--status`). It works with
 NetworkManager (Bookworm/Trixie) and older wpa_supplicant setups, and never
 reads or prints passwords.
 

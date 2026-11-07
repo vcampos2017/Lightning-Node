@@ -52,6 +52,14 @@ elif [ "${NODE_WATCHDOG:-1}" != "0" ]; then
   echo "No /dev/watchdog on this Pi, so no hardware watchdog (the WiFi keeper still runs)."
 fi
 
+# Keep the system log on the SD card, so what happened before a restart
+# is still there afterwards (journalctl -b -1).
+if [ ! -d /var/log/journal ]; then
+  sudo mkdir -p /var/log/journal
+  sudo systemctl restart systemd-journald
+  echo "System log now kept across restarts."
+fi
+
 sudo systemctl daemon-reload
 sudo systemctl enable --now $UNIT
 sudo systemctl restart $UNIT    # pick up a newer wifi_keeper.py on a re-run
