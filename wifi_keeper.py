@@ -19,6 +19,11 @@ Once a minute it checks that the Pi can really reach the internet (not just
     one has no internet. At most once every NODE_WIFI_ROAM_MINUTES.
   - With a network cable plugged in and working, it leaves WiFi alone.
   - At start it turns WiFi power saving off, which makes Pi WiFi drop out.
+  - Last resort: offline for NODE_WIFI_REBOOT_MINUTES (30) in a row, and the
+    home router doesn't answer either, it restarts the Pi. If the router
+    answers, the internet itself is down and a restart wouldn't help, so it
+    waits. At most NODE_WIFI_REBOOTS_PER_DAY (3) restarts a day, so it can
+    never get stuck restarting over and over.
 
 Works with NetworkManager (Raspberry Pi OS Bookworm / Trixie, nmcli) and with
 the older wpa_supplicant + dhcpcd setup (Bullseye and before, wpa_cli). It
@@ -43,6 +48,8 @@ Settings (optional, in /etc/node-wifi.env):
     NODE_WIFI_ROAM_MINUTES          least time between moves to a stronger one (default 15)
     NODE_WIFI_RESET_AFTER           failed recoveries before WiFi off/on (default 3)
     NODE_WIFI_POWERSAVE=1           leave WiFi power saving as it is
+    NODE_WIFI_REBOOT_MINUTES        offline this long before a restart (default 30, 0 = never)
+    NODE_WIFI_REBOOTS_PER_DAY       most restarts in 24 hours (default 3)
     NODE_WIFI_CHECK_URLS            comma list of check pages (defaults below)
     NODE_WIFI_AVOID                 comma list of saved network names (SSIDs) never to pick
 
@@ -84,6 +91,12 @@ ROAM_CHECKS = 3             # weak checks in a row before moving to a stronger o
 RESCAN_SECONDS = 300        # fresh scan at most this often while things are fine
 RETRY_SECONDS = 300         # after trying everything and failing, wait this long
 STATUS_FILE = os.getenv("NODE_WIFI_STATUS_FILE", "/run/node-wifi.json")
+REBOOT_SECONDS = _num("NODE_WIFI_REBOOT_MINUTES", 30) * 60
+REBOOTS_PER_DAY = max(0, int(_num("NODE_WIFI_REBOOTS_PER_DAY", 3)))
+# Kept on the SD card (not /run) so the count survives the restart itself.
+REBOOT_FILE = os.getenv("NODE_WIFI_REBOOT_FILE", "/var/lib/node-wifi/reboots.json")
+# One line per restart with what the Pi saw just before, to find the cause later.
+RESTART_LOG = os.path.join(os.path.dirname(REBOOT_FILE), "restarts.log")
 
 # The same kind of check NetworkManager and phones use. Both are plain
 # "are you there?" pages; nothing about the node is sent.
@@ -118,6 +131,38 @@ def internet_ok(timeout: float = 6.0) -> bool:
         except Exception:
             continue
     return False
+
+
+def default_gateway(route_file: str = "/proc/net/route") -> Optional[str]:
+    """The home router's address, from the kernel's routing table."""
+    try:
+        with open(route_file) as f:
+            next(f)
+            for line in f:
+                p = line.split()
+                if len(p) > 2 and p[1] == "00000000" and p[2] != "00000000":
+                    g = int(p[2], 16)
+                    return ".".join(str((g >> (8 * i)) & 255) for i in range(4))
+    except (OSError, StopIteration, ValueError):
+        pass
+    return None
+
+
+def router_ok() -> bool:
+    """True if the home router answers a ping: then the WiFi works and it's
+    the internet beyond it that's down."""
+    gw = default_gateway()
+    if not gw:
+        return False
+    try:
+        return subprocess.run(["ping", "-c", "2", "-W", "3", gw], capture_output=True,
+                              timeout=15).returncode == 0
+    except Exception:
+        return False
+
+
+def reboot_now() -> None:
+    subprocess.run(["systemctl", "reboot"], timeout=30)
 
 
 def split_terse(line: str) -> List[str]:
@@ -422,7 +467,9 @@ class Keeper:
     def __init__(self, nm, online: Callable[[], bool] = internet_ok,
                  notice: Optional[Callable[[str], None]] = None,
                  clock: Callable[[], float] = time.time,
-                 settle: Callable[[], None] = lambda: time.sleep(5)):
+                 settle: Callable[[], None] = lambda: time.sleep(5),
+                 router: Callable[[], bool] = router_ok,
+                 reboot: Callable[[], None] = reboot_now):
         self.nm = nm
         self.online = online
         self.notice = notice or log
@@ -437,6 +484,13 @@ class Keeper:
         self.recoveries = 0         # recoveries in a row that found nothing
         self.told_offline = False
         self.status: Dict = {}
+        self.router = router
+        self.reboot = reboot
+        self.last_online = True
+        self.offline_since: Optional[float] = None
+        self.reboot_note = ""       # last "not restarting because..." line logged
+        self.last_result = ""
+        self.wifi_seen = "-"        # WiFi state at the last check, for the restart log
 
     # -- helpers ---------------------------------------------------------
     def _current(self, saved: List[Saved], dev: Dict[str, str]) -> Optional[Saved]:
@@ -472,21 +526,95 @@ class Keeper:
         except OSError:
             pass
 
-    # -- one check -------------------------------------------------------
     def step(self) -> str:
+        result = self._step()
+        self.last_result = result
+        return self._watch_reboot(result)
+
+    def _log_restart(self, now: float, mins: float) -> None:
+        line = (f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}  "
+                f"offline {mins:.0f} min, router {default_gateway() or 'unknown'} not answering, "
+                f"wifi: {self.wifi_seen}, last check: {self.last_result}")
+        try:
+            try:
+                with open(RESTART_LOG) as f:
+                    old = f.read().splitlines()[-49:]
+            except OSError:
+                old = []
+            with open(RESTART_LOG, "w") as f:
+                f.write("\n".join(old + [line]) + "\n")
+        except OSError:
+            pass
+
+    # -- last resort: restart the Pi ---------------------------------------
+    def _reboots(self, now: float) -> List[float]:
+        try:
+            with open(REBOOT_FILE) as f:
+                times = [float(t) for t in json.load(f)]
+        except (OSError, ValueError, TypeError):
+            times = []
+        return [t for t in times if now - t < 86400]
+
+    def _note(self, key: str, text: str) -> str:
+        """Log a "not restarting because..." line once per reason, not every minute."""
+        if key != self.reboot_note:
+            self.reboot_note = key
+            log(text)
+        return text
+
+    def _watch_reboot(self, result: str) -> str:
+        now = self.clock()
+        if self.last_online:
+            self.offline_since = None
+            self.reboot_note = ""
+            return result
+        if self.offline_since is None:
+            self.offline_since = now
+        if REBOOT_SECONDS <= 0 or now - self.offline_since < REBOOT_SECONDS:
+            return result
+        mins = (now - self.offline_since) / 60
+        if self.router():
+            return self._note("isp", f"Offline {mins:.0f} min, but the router answers: the internet "
+                              "itself is down, so restarting wouldn't help.")
+        times = self._reboots(now)
+        if len(times) >= REBOOTS_PER_DAY:
+            return self._note("cap", f"Offline {mins:.0f} min; already restarted {len(times)} times "
+                              "today, so not restarting again.")
+        try:
+            os.makedirs(os.path.dirname(REBOOT_FILE), exist_ok=True)
+            with open(REBOOT_FILE, "w") as f:
+                json.dump(times + [now], f)
+        except OSError as e:
+            # Without the count it could restart forever, so don't.
+            return self._note("file", f"Can't save the restart count ({e}), so not restarting.")
+        log(f"Offline {mins:.0f} min and the router doesn't answer: restarting the Pi "
+            f"(restart {len(times) + 1} of {REBOOTS_PER_DAY} allowed today).")
+        self._log_restart(now, mins)
+        self.offline_since = None
+        self.reboot()
+        return "restarting"
+
+    # -- one check -------------------------------------------------------
+    def _step(self) -> str:
         now = self.clock()
         dev = self.nm.wifi_device()
+        self.wifi_seen = (f"{dev['device']} {dev['state']} {dev['connection'] or '(no network)'}"
+                          if dev else "no WiFi device")
         if dev is None:
+            # The WiFi chip itself can vanish on a Pi Zero; a restart brings it back.
+            self.last_online = self.online()
             return "no wifi device"
         ifname = dev["device"]
         if self.nm.wired_connected() and self.online():
             self.fails = 0
+            self.last_online = True
             return "on a cable, leaving WiFi alone"
 
         saved = self.nm.saved(now)
         current = self._current(saved, dev)
 
-        if self.online():
+        self.last_online = self.online()
+        if self.last_online:
             self.fails = 0
             self.recoveries = 0
             if self.told_offline:
@@ -601,6 +729,16 @@ def show_status(nm) -> None:
         print(f"  {s.ssid:<28} {where}{extra}")
     if not saved:
         print("  (none found)")
+    try:
+        with open(RESTART_LOG) as f:
+            restarts = f.read().splitlines()[-5:]
+    except OSError:
+        restarts = []
+    print("\nRestarts by the WiFi keeper (latest last):")
+    for r in restarts:
+        print(f"  {r}")
+    if not restarts:
+        print("  (none)")
     if len(saved) < 2:
         print("\nOnly one saved network: it can't switch, but it will still reconnect\n"
               "and restart WiFi when the internet drops. Add your other WiFi to let it switch.")

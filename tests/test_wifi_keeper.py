@@ -10,6 +10,9 @@ wk = importlib.util.module_from_spec(_spec)
 sys.modules["wifi_keeper"] = wk
 _spec.loader.exec_module(wk)
 wk.STATUS_FILE = os.path.join(tempfile.mkdtemp(), "wifi.json")
+wk.REBOOT_FILE = os.path.join(tempfile.mkdtemp(), "state", "reboots.json")
+wk.RESTART_LOG = os.path.join(os.path.dirname(wk.REBOOT_FILE), "restarts.log")
+REBOOTS = []
 
 
 class FakeAir:
@@ -73,7 +76,8 @@ SAVED = [("AVC-2G", "u1", "AVC-2G", True),
 def make(air, t):
     notices = []
     k = wk.Keeper(wk.NM(run=air, pause=lambda s: None), online=air.online, notice=notices.append,
-                  clock=lambda: t[0], settle=lambda: None)
+                  clock=lambda: t[0], settle=lambda: None,
+                  router=lambda: False, reboot=lambda: REBOOTS.append(t[0]))
     return k, notices
 
 
@@ -275,7 +279,8 @@ def make_wpa(air, t, sysfs):
     notices = []
     w = wk.WPA(run=air, sysfs=sysfs, pause=lambda s: None)
     k = wk.Keeper(w, online=air.online, notice=notices.append,
-                  clock=lambda: t[0], settle=lambda: None)
+                  clock=lambda: t[0], settle=lambda: None,
+                  router=lambda: False, reboot=lambda: REBOOTS.append(t[0]))
     return w, k, notices
 
 
@@ -360,6 +365,98 @@ def test_never_touches_password_files():
     finally:
         builtins.open = real_open
     assert not any("wpa_supplicant" in p or "NetworkManager" in p for p in opened)
+
+
+# --- last resort: restart the Pi --------------------------------------------
+
+def _fresh_reboots():
+    REBOOTS.clear()
+    for p in (wk.REBOOT_FILE, wk.RESTART_LOG):
+        if os.path.exists(p):
+            os.remove(p)
+
+
+def test_restarts_after_long_offline_when_router_is_gone():
+    _fresh_reboots()
+    air = FakeAir(SAVED[:1], {"AVC-2G": 70}, {}, "AVC-2G")
+    t = [1000.0]
+    k, _ = make(air, t)
+    results = []
+    for _ in range(40):
+        results.append(k.step())
+        t[0] += 60
+    assert "restarting" in results
+    assert results.index("restarting") >= 29         # not before 30 minutes
+    assert len(REBOOTS) == 1                         # then waits another 30 min
+    with open(wk.RESTART_LOG) as f:
+        entry = f.read().splitlines()[-1]
+    assert "offline 30 min" in entry and "wlan0" in entry and "AVC-2G" in entry
+
+
+def test_never_restarts_more_than_the_daily_cap():
+    _fresh_reboots()
+    air = FakeAir(SAVED[:1], {"AVC-2G": 70}, {}, "AVC-2G")
+    t = [1000.0]
+    for _ in range(6):                                # six "boots" in a row
+        k, _ = make(air, t)                           # a new process each boot
+        for _ in range(35):
+            k.step()
+            t[0] += 60
+    assert len(REBOOTS) == wk.REBOOTS_PER_DAY
+    t[0] += 86400                                     # a day later it may again
+    k, _ = make(air, t)
+    for _ in range(35):
+        k.step()
+        t[0] += 60
+    assert len(REBOOTS) == wk.REBOOTS_PER_DAY + 1
+
+
+def test_no_restart_when_only_the_internet_is_down():
+    _fresh_reboots()
+    air = FakeAir(SAVED[:1], {"AVC-2G": 70}, {}, "AVC-2G")
+    t = [1000.0]
+    k, _ = make(air, t)
+    k.router = lambda: True                           # router answers: ISP outage
+    for _ in range(90):
+        r = k.step()
+        t[0] += 60
+    assert not REBOOTS
+    assert "internet itself is down" in r
+
+
+def test_no_restart_when_internet_comes_back():
+    _fresh_reboots()
+    air = FakeAir(SAVED[:1], {"AVC-2G": 70}, {}, "AVC-2G")
+    t = [1000.0]
+    k, _ = make(air, t)
+    for i in range(60):
+        air.internet["AVC-2G"] = (i % 20 == 19)       # back for a minute every 20
+        k.step()
+        t[0] += 60
+    assert not REBOOTS
+
+
+def test_restart_when_wifi_chip_vanishes():
+    _fresh_reboots()
+    air = FakeAir(SAVED[:1], {"AVC-2G": 70}, {}, None)
+    t = [1000.0]
+    k, _ = make(air, t)
+    k.nm.wifi_device = lambda: None
+    for _ in range(35):
+        k.step()
+        t[0] += 60
+    assert len(REBOOTS) == 1
+
+
+def test_default_gateway_from_route_table():
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "route")
+    with open(p, "w") as f:
+        f.write("Iface\tDestination\tGateway\tFlags\n"
+                "wlan0\t0001A8C0\t00000000\t0001\n"
+                "wlan0\t00000000\t0101A8C0\t0003\n")
+    assert wk.default_gateway(p) == "192.168.1.1"
+    assert wk.default_gateway(os.path.join(d, "missing")) is None
 
 
 if __name__ == "__main__":

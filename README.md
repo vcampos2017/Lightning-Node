@@ -61,7 +61,13 @@ internet (the same keeper Chatty uses). Every minute it checks the internet;
 after two misses it tries the other saved networks, strongest first, and if
 none works it reconnects and, every few rounds, switches WiFi off and on. It
 also moves off a weak signal when a saved network is much stronger, leaves WiFi
-alone on a working cable, and turns WiFi power saving off. It works with
+alone on a working cable, and turns WiFi power saving off. As a last resort,
+after 30 minutes offline with the home router not answering either, it restarts
+the Pi (at most 3 times a day; never when only the internet is down). The
+installer also turns on the Pi's hardware watchdog, so a frozen Pi restarts
+itself after about 15 seconds, and keeps the system log across restarts. Each
+restart is noted with what the Pi saw just before in
+`/var/lib/node-wifi/restarts.log` (also shown by `--status`). It works with
 NetworkManager (Bookworm/Trixie) and older wpa_supplicant setups, and never
 reads or prints passwords.
 
