@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# WiFi keeper: stay on the best saved WiFi that really reaches the internet.
+# WiFi keeper: stay on the best saved WiFi that really reaches the internet,
+# restart the Pi as a last resort, and turn on the hardware watchdog.
 # Run this ON the node Pi, from the repo folder:
 #   bash install_wifi_keeper.sh
 set -euo pipefail
@@ -33,8 +34,27 @@ RestartSec=10
 WantedBy=multi-user.target
 UNITFILE
 
+# Hardware watchdog: if the whole Pi freezes (nothing runs, not even this
+# keeper), the Pi's own watchdog chip restarts it after about 15 seconds.
+# Skip with: NODE_WATCHDOG=0 bash install_wifi_keeper.sh
+if grep -qs '^RuntimeWatchdogSec' $(ls /etc/systemd/system.conf.d/*.conf 2>/dev/null | grep -v node-watchdog.conf) /dev/null; then
+  echo "Hardware watchdog is already on."
+elif [ "${NODE_WATCHDOG:-1}" != "0" ] && [ -e /dev/watchdog ]; then
+  sudo mkdir -p /etc/systemd/system.conf.d
+  sudo tee /etc/systemd/system.conf.d/node-watchdog.conf >/dev/null <<'WD'
+[Manager]
+RuntimeWatchdogSec=15s
+RebootWatchdogSec=2min
+WD
+  sudo systemctl daemon-reexec
+  echo "Hardware watchdog on: a frozen Pi restarts itself."
+elif [ "${NODE_WATCHDOG:-1}" != "0" ]; then
+  echo "No /dev/watchdog on this Pi, so no hardware watchdog (the WiFi keeper still runs)."
+fi
+
 sudo systemctl daemon-reload
 sudo systemctl enable --now $UNIT
+sudo systemctl restart $UNIT    # pick up a newer wifi_keeper.py on a re-run
 sleep 2
 sudo systemctl --no-pager status $UNIT | head -n 8
 echo
