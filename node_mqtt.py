@@ -21,10 +21,16 @@ broker posts {"state": "offline"} for it (the last will) and Chatty shows
 If paho-mqtt is missing or the broker can't be reached, lightning detection
 and Bluesky posting carry on as before.
 
+Finding Chatty: broker_link.py tries her home address, chatty-node.local and
+her Tailscale address, learns which WiFi she's on from her `chatty/hub` note,
+and follows her when she moves. The heartbeat says how it reached her
+("via": "lan" or "tailscale", "chatty_wifi").
+
 Settings (environment variables, e.g. in ~/.bluesky_env):
     MQTT_HOST        broker address (default chatty-node.local, Chatty's Pi)
     MQTT_PORT        default 1883
     NODE_NAME        default "lightning"
+    MQTT_HOSTS, MQTT_TAILSCALE, MQTT_SCAN: see broker_link.py
     LIGHTNING_MQTT=0 turn this off
 """
 from __future__ import annotations
@@ -37,7 +43,6 @@ import time
 from typing import Any, Callable, Optional
 
 ENABLED = os.getenv("LIGHTNING_MQTT", "1").strip() != "0"
-HOST = os.getenv("MQTT_HOST", "chatty-node.local").strip()
 PORT = int(os.getenv("MQTT_PORT", "1883"))
 NAME = os.getenv("NODE_NAME", "lightning").strip() or "lightning"
 TITLE = "Lightning node"
@@ -49,15 +54,18 @@ DATA = f"chatty/nodes/{NAME}/data"
 StateProvider = Callable[[], dict]
 
 
-def status_payload(state: dict[str, Any], online: str = "online") -> str:
-    return json.dumps({
+def status_payload(state: dict[str, Any], online: str = "online",
+                   link_info: Optional[dict] = None) -> str:
+    body = {
         "state": online,
         "every": EVERY,
         "ts": int(time.time()),
         "title": TITLE,
         "host": socket.gethostname(),
         "sensor": state.get("sensor", "unknown"),
-    })
+    }
+    body.update(link_info or {})
+    return json.dumps(body)
 
 
 def data_payload(state: dict[str, Any]) -> str:
@@ -71,12 +79,12 @@ class CheckIn:
         self.state_provider = state_provider
         self.client = None
         self.connected = False
+        self.link = None
         self._wake = threading.Event()
 
     # -- paho callbacks --
     def _on_connect(self, client, userdata, flags, *rest):
         self.connected = True
-        print(f"Node network: connected to {HOST}:{PORT}", flush=True)
         self._publish_all()
 
     def _on_disconnect(self, *args):
@@ -95,7 +103,7 @@ class CheckIn:
         state = self._state()
         if state is None or self.client is None:
             return
-        self.client.publish(STATUS, status_payload(state), qos=1, retain=True)
+        self.client.publish(STATUS, status_payload(state, link_info=self.link.info() if self.link else None), qos=1, retain=True)
         self.client.publish(DATA, data_payload(state), qos=1, retain=True)
 
     def publish_now(self) -> None:
@@ -111,7 +119,6 @@ class CheckIn:
         client.will_set(STATUS, json.dumps({"state": "offline"}), qos=1, retain=True)
         client.on_connect = self._on_connect
         client.on_disconnect = self._on_disconnect
-        client.reconnect_delay_set(min_delay=2, max_delay=60)
         return client
 
     def _loop(self) -> None:
@@ -132,10 +139,8 @@ class CheckIn:
                   "(pip install paho-mqtt in the venv)", flush=True)
             return False
         self.client = self._make_client(mqtt)
-        try:
-            self.client.connect_async(HOST, PORT, keepalive=60)
-        except Exception as e:
-            print(f"Node network: can't reach {HOST}:{PORT} ({e!r}); will keep trying", flush=True)
-        self.client.loop_start()
+        import broker_link
+        self.link = broker_link.BrokerLink(self.client, port=PORT, keepalive=60)
+        self.link.start()
         threading.Thread(target=self._loop, name="node-mqtt", daemon=True).start()
         return True
