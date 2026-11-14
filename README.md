@@ -54,6 +54,37 @@ pip install -r requirements.txt
 
 ---
 
+## 🖥️ Status at SSH login
+
+`lightning_status.py` prints a short summary when you log in, like the rain and
+greenhouse nodes: a yellow LIGHTNING banner with the Pi's name and address,
+whether the AS3935 answers (or "missing ... check the wires" while it's
+unplugged), strikes today and the last one (how far, how long ago), a storm in
+progress, false alarms filtered in the last hour, whether Bluesky is in practice
+(dry run) or live and whether the NOAA check has a location, the services
+(lightning-bluesky, node-wifi, tailscale, and the MQTT link to Chatty over lan or
+tailscale), the WiFi network, signal and internet, and the Pi's temperature and
+uptime.
+
+The service writes its state to `/dev/shm/lightning-node.json` (in RAM, no
+secrets) once a minute and right after a strike; if it's stopped, the screen
+counts strikes from `lightning_telemetry.jsonl` instead. It never reads or
+prints the Bluesky password, needs no venv, and changes nothing.
+
+```bash
+python3 ~/Lightning-Node/lightning_status.py
+```
+
+To show it every time you log in over SSH, run this once:
+
+```bash
+grep -q lightning_status ~/.bashrc || echo '[ -n "$SSH_CONNECTION" ] && python3 ~/Lightning-Node/lightning_status.py' >> ~/.bashrc
+```
+
+Tests: `python3 tests/test_lightning_status.py`
+
+---
+
 ## 📶 WiFi keeper
 
 `wifi_keeper.py` keeps the node on the best saved WiFi that really reaches the
