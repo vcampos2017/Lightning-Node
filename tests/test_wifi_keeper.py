@@ -459,6 +459,114 @@ def test_default_gateway_from_route_table():
     assert wk.default_gateway(os.path.join(d, "missing")) is None
 
 
+class home:
+    """Set NODE_WIFI_HOME for one test."""
+
+    def __init__(self, ssid):
+        self.ssid = ssid
+
+    def __enter__(self):
+        self.old = wk.HOME
+        wk.HOME = self.ssid
+
+    def __exit__(self, *a):
+        wk.HOME = self.old
+
+
+HOME_SAVED = [("GF-Home", "h1", "GF-Home", True), ("AVC-2G", "u1", "AVC-2G", True)]
+
+
+def test_moves_back_home_when_home_is_usable():
+    air = FakeAir(HOME_SAVED, {"GF-Home": 55, "AVC-2G": 80},
+                  {"GF-Home": True, "AVC-2G": True}, "AVC-2G")
+    t = [10000.0]
+    k, notices = make(air, t)
+    with home("GF-Home"):
+        for _ in range(wk.ROAM_CHECKS - 1):
+            assert "home GF-Home is in range" in k.step()
+            t[0] += 60
+        assert air.current == "AVC-2G"           # not on the first glimpse
+        assert k.step() == "moved home to GF-Home"
+        assert air.current == "GF-Home"
+        assert "home WiFi, GF-Home" in notices[0]
+        for _ in range(30):                      # and stays, though AVC-2G is stronger
+            k.step()
+            t[0] += 60
+    assert air.current == "GF-Home"
+    assert len(notices) == 1
+
+
+def test_home_too_weak_is_left_alone():
+    air = FakeAir(HOME_SAVED, {"GF-Home": 20, "AVC-2G": 80},
+                  {"GF-Home": True, "AVC-2G": True}, "AVC-2G")
+    t = [10000.0]
+    k, notices = make(air, t)
+    with home("GF-Home"):
+        for _ in range(10):
+            k.step()
+            t[0] += 60
+    assert air.current == "AVC-2G" and not notices
+
+
+def test_home_without_internet_backs_off():
+    air = FakeAir(HOME_SAVED, {"GF-Home": 60, "AVC-2G": 80},
+                  {"GF-Home": False, "AVC-2G": True}, "AVC-2G")
+    t = [10000.0]
+    k, notices = make(air, t)
+    tries = []
+    with home("GF-Home"):
+        for minute in range(6 * 60):
+            r = k.step()
+            if r.startswith("stayed on AVC-2G"):
+                tries.append(minute)
+            t[0] += 60
+    assert air.current == "AVC-2G" and not notices
+    gaps = [b - a for a, b in zip(tries, tries[1:])]
+    assert len(tries) >= 3 and gaps == sorted(gaps) and gaps[-1] > gaps[0]
+
+
+def test_on_home_only_very_weak_signal_moves_it():
+    air = FakeAir(HOME_SAVED, {"GF-Home": 35, "AVC-2G": 90},
+                  {"GF-Home": True, "AVC-2G": True}, "GF-Home")
+    t = [10000.0]
+    k, notices = make(air, t)
+    with home("GF-Home"):
+        for _ in range(10):                      # 35% is weak, but fine for home
+            k.step()
+            t[0] += 60
+        assert air.current == "GF-Home"
+        air.signals["GF-Home"] = 15              # really bad now
+        for _ in range(wk.ROAM_CHECKS):
+            r = k.step()
+            t[0] += 60
+    assert r == "moved to stronger AVC-2G"
+
+
+def test_offline_tries_home_first():
+    saved = HOME_SAVED + [("AVC-5G", "u2", "AVC-5G", True)]
+    air = FakeAir(saved, {"GF-Home": 50, "AVC-2G": 70, "AVC-5G": 90},
+                  {"GF-Home": True, "AVC-2G": False, "AVC-5G": True}, "AVC-2G")
+    t = [10000.0]
+    k, notices = make(air, t)
+    with home("GF-Home"):
+        k.step()
+        t[0] += 60
+        assert k.step() == "switched to GF-Home"
+
+
+def test_wpa_moves_back_home():
+    air = FakeWpa([("0", "AVC-2G"), ("1", "GF-Home")], {"AVC-2G": -50, "GF-Home": -70},
+                  {"AVC-2G": True, "GF-Home": True}, "0")
+    t = [10000.0]
+    w, k, notices = make_wpa(air, t, _sysfs())
+    with home("GF-Home"):
+        for _ in range(wk.ROAM_CHECKS):
+            r = k.step()
+            t[0] += 60
+    assert r == "moved home to GF-Home"
+    assert air.current == "1" and air.disabled == set()
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
