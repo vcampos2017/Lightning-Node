@@ -51,7 +51,7 @@ class FakeClient:
 def _resolve_everything(monkey=None):
     # every test name resolves to itself; .local names to a home address
     def fake(host, port, *a):
-        ip = "192.168.1.50" if host.endswith(".local") else host
+        ip = "192.168.1.110" if host.endswith(".local") else host
         return [(2, 1, 6, "", (ip, port))]
     broker_link.socket.getaddrinfo = fake
 
@@ -64,7 +64,7 @@ def _link(client, hub_note=None, **kw):
     hub = broker_link.HubNote(path)
     logs = []
     kw.setdefault("hosts", ["chatty-node.local"])
-    kw.setdefault("tailscale", "100.69.130.79")
+    kw.setdefault("tailscale", "100.64.0.10")
     kw.setdefault("scan", False)
     link = broker_link.BrokerLink(client, hub=hub, log=logs.append, **kw)
     link.logs = logs
@@ -72,18 +72,18 @@ def _link(client, hub_note=None, **kw):
 
 
 def test_kind_of():
-    assert broker_link.kind_of("100.69.130.79") == "tailscale"
-    assert broker_link.kind_of("192.168.1.50") == "lan"
+    assert broker_link.kind_of("100.64.0.10") == "tailscale"
+    assert broker_link.kind_of("192.168.1.110") == "lan"
     assert broker_link.kind_of("chatty-node.local") == "lan"
 
 
 def test_falls_back_to_tailscale_when_home_name_fails():
     _resolve_everything()
-    c = FakeClient(up={"100.69.130.79"})
+    c = FakeClient(up={"100.64.0.10"})
     link = _link(c)
     assert link.connect_round()
-    assert c.tried == ["chatty-node.local", "100.69.130.79"]
-    assert link.via == "tailscale" and link.good == "100.69.130.79"
+    assert c.tried == ["chatty-node.local", "100.64.0.10"]
+    assert link.via == "tailscale" and link.good == "100.64.0.10"
     assert broker_link.HUB_TOPIC in c.subs
 
 
@@ -96,55 +96,55 @@ def test_users_callbacks_still_run():
     link = _link(c)
     assert link.connect_round() and seen == ["connect"]
     c.on_message(c, None, Msg("chatty/forecast/rain", b"{}"))
-    c.on_message(c, None, Msg(broker_link.HUB_TOPIC, b'{"wifi":"GF-Home","lan":["192.168.1.50"]}'))
+    c.on_message(c, None, Msg(broker_link.HUB_TOPIC, b'{"wifi":"HomeWiFi","lan":["192.168.1.110"]}'))
     assert seen == ["connect", "chatty/forecast/rain"]   # her note isn't passed on
-    assert link.hub.wifi == "GF-Home"
+    assert link.hub.wifi == "HomeWiFi"
 
 
 def test_learns_her_addresses_and_remembers_them():
     _resolve_everything()
-    c = FakeClient(up={"100.69.130.79"})
+    c = FakeClient(up={"100.64.0.10"})
     link = _link(c)
     link.connect_round()
-    note = {"host": "chatty-node", "wifi": "AVC-2G", "lan": ["192.168.1.77"],
-            "tailscale": "100.69.130.79", "known": {"GF-Home": "192.168.1.50", "AVC-2G": "192.168.1.77"}}
+    note = {"host": "chatty-node", "wifi": "ExtenderWiFi", "lan": ["192.168.1.120"],
+            "tailscale": "100.64.0.10", "known": {"HomeWiFi": "192.168.1.110", "ExtenderWiFi": "192.168.1.120"}}
     c.on_message(c, None, Msg(broker_link.HUB_TOPIC, json.dumps(note).encode()))
-    assert any("AVC-2G" in line for line in link.logs)
+    assert any("ExtenderWiFi" in line for line in link.logs)
     # a fresh start reads the note back from disk and tries her home addresses first
     again = broker_link.HubNote(link.hub.path)
-    assert again.lan_all() == ["192.168.1.77", "192.168.1.50"]
-    c2 = FakeClient(up={"192.168.1.50"})
+    assert again.lan_all() == ["192.168.1.120", "192.168.1.110"]
+    c2 = FakeClient(up={"192.168.1.110"})
     link2 = broker_link.BrokerLink(c2, hub=again, hosts=["chatty-node.local"],
-                                   tailscale="100.69.130.79", scan=False, log=lambda t: None)
+                                   tailscale="100.64.0.10", scan=False, log=lambda t: None)
     assert link2.connect_round()
-    assert c2.tried == ["192.168.1.77", "192.168.1.50"]
+    assert c2.tried == ["192.168.1.120", "192.168.1.110"]
     assert link2.via == "lan"
 
 
 def test_known_addresses_add_up_across_notes():
     hub = broker_link.HubNote(os.path.join(tempfile.mkdtemp(), "h.json"))
-    hub.update(b'{"wifi":"GF-Home","lan":["192.168.1.50"],"known":{"GF-Home":"192.168.1.50"}}', 1)
-    hub.update(b'{"wifi":"AVC-2G","lan":["192.168.1.77"],"known":{"AVC-2G":"192.168.1.77"}}', 2)
-    assert hub.note["known"] == {"GF-Home": "192.168.1.50", "AVC-2G": "192.168.1.77"}
+    hub.update(b'{"wifi":"HomeWiFi","lan":["192.168.1.110"],"known":{"HomeWiFi":"192.168.1.110"}}', 1)
+    hub.update(b'{"wifi":"ExtenderWiFi","lan":["192.168.1.120"],"known":{"ExtenderWiFi":"192.168.1.120"}}', 2)
+    assert hub.note["known"] == {"HomeWiFi": "192.168.1.110", "ExtenderWiFi": "192.168.1.120"}
     assert not hub.update(b"not json", 3)
-    assert not hub.update(b'{"wifi":"AVC-2G","lan":["192.168.1.77"],"known":{"x":"rm -rf"}}', 4)
+    assert not hub.update(b'{"wifi":"ExtenderWiFi","lan":["192.168.1.120"],"known":{"x":"rm -rf"}}', 4)
     assert "x" not in hub.note["known"]
 
 
 def test_follows_her_home_from_tailscale():
     _resolve_everything()
-    c = FakeClient(up={"100.69.130.79", "192.168.1.77"})
+    c = FakeClient(up={"100.64.0.10", "192.168.1.120"})
     link = _link(c, hosts=["chatty-node.local"])
-    link.hub.note = {"wifi": "AVC-2G", "lan": [], "known": {}}
-    c.up.discard("192.168.1.77")
+    link.hub.note = {"wifi": "ExtenderWiFi", "lan": [], "known": {}}
+    c.up.discard("192.168.1.120")
     assert link.connect_round() and link.via == "tailscale"
-    link.hub.note = {"wifi": "AVC-2G", "lan": ["192.168.1.77"], "known": {}}
-    broker_link.tcp_open = lambda host, port=1883, timeout=1.0: host == "192.168.1.77"
-    c.up.add("192.168.1.77")
+    link.hub.note = {"wifi": "ExtenderWiFi", "lan": ["192.168.1.120"], "known": {}}
+    broker_link.tcp_open = lambda host, port=1883, timeout=1.0: host == "192.168.1.120"
+    c.up.add("192.168.1.120")
     link.maybe_follow()
-    assert not link.connected and link.good == "192.168.1.77"
+    assert not link.connected and link.good == "192.168.1.120"
     assert link.connect_round() and link.via == "lan"
-    assert c.tried[-1] == "192.168.1.77"
+    assert c.tried[-1] == "192.168.1.120"
 
 
 def test_no_follow_on_home_network():
@@ -174,7 +174,7 @@ def test_knocked_on_board_must_prove_it_is_hers():
     # this time her note shows up: it's kept
     link.scanned = ["192.168.1.99"]
     assert link.connect_round()
-    c.on_message(c, None, Msg(broker_link.HUB_TOPIC, b'{"wifi":"AVC-2G","lan":["192.168.1.99"]}'))
+    c.on_message(c, None, Msg(broker_link.HUB_TOPIC, b'{"wifi":"ExtenderWiFi","lan":["192.168.1.99"]}'))
     assert not link.unproven and link.good == "192.168.1.99"
 
 
@@ -200,11 +200,11 @@ def test_scan_home_skips_itself():
 
 def test_info():
     _resolve_everything()
-    c = FakeClient(up={"100.69.130.79"})
+    c = FakeClient(up={"100.64.0.10"})
     link = _link(c)
     link.connect_round()
-    link.hub.note = {"wifi": "AVC-2G"}
-    assert link.info() == {"via": "tailscale", "broker": "100.69.130.79", "chatty_wifi": "AVC-2G"}
+    link.hub.note = {"wifi": "ExtenderWiFi"}
+    assert link.info() == {"via": "tailscale", "broker": "100.64.0.10", "chatty_wifi": "ExtenderWiFi"}
 
 
 def _drop_now(c):
@@ -216,7 +216,7 @@ def _drop_now(c):
 def test_early_drop_makes_the_way_shaky_and_tailscale_goes_first():
     _resolve_everything()
     t = [1000.0]
-    c = FakeClient(up={"192.168.1.200", "100.69.130.79"})
+    c = FakeClient(up={"192.168.1.200", "100.64.0.10"})
     link = _link(c, hosts=["192.168.1.200"], clock=lambda: t[0])
     assert link.connect_round() and link.host == "192.168.1.200"
     t[0] += 100
@@ -228,11 +228,11 @@ def test_early_drop_makes_the_way_shaky_and_tailscale_goes_first():
     assert link.candidates()[-1] == "192.168.1.200"
     assert link.connect_round() and link.via == "tailscale"
     # no following "home" over the shaky way
-    link.hub.note = {"wifi": "AVC-2G", "lan": ["192.168.1.200"], "known": {}}
+    link.hub.note = {"wifi": "ExtenderWiFi", "lan": ["192.168.1.200"], "known": {}}
     broker_link.tcp_open = lambda *a, **k: True
     t[0] += broker_link.FOLLOW_EVERY + 1
     link.maybe_follow()
-    assert link.connected and link.host == "100.69.130.79"
+    assert link.connected and link.host == "100.64.0.10"
 
 
 def test_shaky_time_out_doubles_then_clears_after_a_steady_hour():
@@ -259,30 +259,30 @@ def test_shaky_time_out_doubles_then_clears_after_a_steady_hour():
 
 
 def test_a_name_that_leads_to_a_shaky_address_waits_too():
-    _resolve_everything()          # chatty-node.local -> 192.168.1.50
+    _resolve_everything()          # chatty-node.local -> 192.168.1.110
     t = [1000.0]
-    c = FakeClient(up={"chatty-node.local", "100.69.130.79"})
+    c = FakeClient(up={"chatty-node.local", "100.64.0.10"})
     link = _link(c, clock=lambda: t[0])
-    link.shaky_until["192.168.1.50"] = t[0] + 999
+    link.shaky_until["192.168.1.110"] = t[0] + 999
     assert link.connect_round()
-    assert link.host == "100.69.130.79"
-    assert c.tried == ["chatty-node.local", "100.69.130.79"]
+    assert link.host == "100.64.0.10"
+    assert c.tried == ["chatty-node.local", "100.64.0.10"]
 
 
 def test_moving_home_on_purpose_is_not_a_shaky_drop():
     _resolve_everything()
     t = [1000.0]
-    c = FakeClient(up={"100.69.130.79", "192.168.1.200"})
+    c = FakeClient(up={"100.64.0.10", "192.168.1.200"})
     link = _link(c, hosts=["nowhere"], clock=lambda: t[0])
     c.up.discard("192.168.1.200")
     link.connect_round()
     assert link.via == "tailscale"
     c.up.add("192.168.1.200")
-    link.hub.note = {"wifi": "AVC-2G", "lan": ["192.168.1.200"], "known": {}}
+    link.hub.note = {"wifi": "ExtenderWiFi", "lan": ["192.168.1.200"], "known": {}}
     broker_link.tcp_open = lambda *a, **k: True
     t[0] += 30
     link.maybe_follow()
-    assert not link.is_shaky("100.69.130.79") and link.good == "192.168.1.200"
+    assert not link.is_shaky("100.64.0.10") and link.good == "192.168.1.200"
 
 
 if __name__ == "__main__":

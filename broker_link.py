@@ -3,7 +3,7 @@
 The same file lives in every node's repo (rain, greenhouse, lightning, word
 clock). Keep the copies the same.
 
-Why: Chatty's WiFi keeper can move her from GF-Home to the AVC-2G extender
+Why: Chatty's WiFi keeper can move her from HomeWiFi to the ExtenderWiFi extender
 (or back). Her home address changes, and "chatty-node.local" often doesn't
 make it across the extender, so the nodes lost her (2026-11-13, 4:21 PM).
 
@@ -13,10 +13,10 @@ What it does instead of a single broker address:
        - her home addresses she told us about (one per WiFi she has used)
        - MQTT_HOST (default chatty-node.local)
        - her Tailscale address (works on any WiFi, as long as both Pis have
-         internet and Tailscale; default 100.69.130.79)
+         internet and Tailscale; from MQTT_TAILSCALE or her note)
   2. Listens to Chatty's retained note on `chatty/hub`:
-       {"host": "chatty-node", "wifi": "AVC-2G", "lan": ["192.168.1.77"],
-        "tailscale": "100.69.130.79", "known": {"GF-Home": "192.168.1.50", ...}}
+       {"host": "chatty-node", "wifi": "ExtenderWiFi", "lan": ["192.168.1.120"],
+        "tailscale": "100.64.0.10", "known": {"HomeWiFi": "192.168.1.110", ...}}
      and keeps it in a small file, so after a restart it still knows where
      she might be. That's how a node knows which WiFi Chatty is on.
   3. Follows her: when it had to go the long way round (Tailscale) and her
@@ -25,7 +25,7 @@ What it does instead of a single broker address:
   4. Remembers shaky ways: a connection that drops within 10 minutes marks
      that address shaky for 30 minutes (doubling each time, up to 6 hours,
      forgotten after it holds for an hour). Shaky addresses are tried last and
-     never followed back to. On 2026-11-13 the way across the AVC-2G extender
+     never followed back to. On 2026-11-13 the way across the ExtenderWiFi extender
      opened fine but dropped every 1-5 minutes, and following her "home" over
      it every 5 minutes kept the rain node blinking.
   5. Last resort, when nothing on the list answers for a few rounds: knocks
@@ -39,7 +39,8 @@ Settings (environment):
     MQTT_HOST        her name or address (default chatty-node.local)
     MQTT_HOSTS       a full list to use instead, comma-separated, tried in order
     MQTT_PORT        default 1883
-    MQTT_TAILSCALE   her Tailscale address (default 100.69.130.79, "" = don't use)
+    MQTT_TAILSCALE   her Tailscale address (default: none; the node also
+                     learns it from her chatty/hub note)
     MQTT_SCAN=0      never knock on the home network
     MQTT_HUB_FILE    where her note is kept
                      (default ~/.local/state/chatty-hub.json)
@@ -49,7 +50,7 @@ Use it in place of connect_async + loop_start:
     client = mqtt.Client(...)            # will, callbacks as before
     link = broker_link.BrokerLink(client)
     link.start()                         # runs in the background
-    link.host, link.via                  # e.g. "100.69.130.79", "tailscale"
+    link.host, link.via                  # e.g. "100.64.0.10", "tailscale"
 """
 from __future__ import annotations
 
@@ -64,7 +65,7 @@ from typing import Callable, List, Optional
 
 HUB_TOPIC = "chatty/hub"
 PORT = int(os.getenv("MQTT_PORT", "1883"))
-DEFAULT_TAILSCALE = "100.69.130.79"
+DEFAULT_TAILSCALE = ""     # set MQTT_TAILSCALE, or it comes from her chatty/hub note
 FOLLOW_EVERY = 300        # how often to look for a shorter way to her, seconds
 SCAN_AFTER_ROUNDS = 3     # full rounds with no answer before knocking around
 SCAN_GAP = 600            # at most one knock-around per 10 minutes
