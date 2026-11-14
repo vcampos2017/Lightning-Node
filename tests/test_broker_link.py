@@ -207,6 +207,84 @@ def test_info():
     assert link.info() == {"via": "tailscale", "broker": "100.69.130.79", "chatty_wifi": "AVC-2G"}
 
 
+def _drop_now(c):
+    """The way to the board dies (what the broker calls 'exceeded timeout')."""
+    c.host = None
+    c.on_disconnect(c, None, {}, 7)
+
+
+def test_early_drop_makes_the_way_shaky_and_tailscale_goes_first():
+    _resolve_everything()
+    t = [1000.0]
+    c = FakeClient(up={"192.168.1.200", "100.69.130.79"})
+    link = _link(c, hosts=["192.168.1.200"], clock=lambda: t[0])
+    assert link.connect_round() and link.host == "192.168.1.200"
+    t[0] += 100
+    _drop_now(c)
+    assert link.is_shaky("192.168.1.200")
+    assert any("dropped after 100 s" in line for line in link.logs)
+    assert link.candidates()[-1] == "192.168.1.200"
+    link.good = "192.168.1.200"            # even the last good one waits its turn
+    assert link.candidates()[-1] == "192.168.1.200"
+    assert link.connect_round() and link.via == "tailscale"
+    # no following "home" over the shaky way
+    link.hub.note = {"wifi": "AVC-2G", "lan": ["192.168.1.200"], "known": {}}
+    broker_link.tcp_open = lambda *a, **k: True
+    t[0] += broker_link.FOLLOW_EVERY + 1
+    link.maybe_follow()
+    assert link.connected and link.host == "100.69.130.79"
+
+
+def test_shaky_time_out_doubles_then_clears_after_a_steady_hour():
+    _resolve_everything()
+    t = [1000.0]
+    c = FakeClient(up={"192.168.1.200"})
+    link = _link(c, hosts=["192.168.1.200"], tailscale="", clock=lambda: t[0])
+    link.connect_round()
+    t[0] += 60
+    _drop_now(c)
+    assert link.shaky_for["192.168.1.200"] == broker_link.SHAKY_FIRST
+    t[0] += broker_link.SHAKY_FIRST + 1
+    assert not link.is_shaky("192.168.1.200")
+    assert link.connect_round()
+    t[0] += 60
+    _drop_now(c)
+    assert link.shaky_for["192.168.1.200"] == 2 * broker_link.SHAKY_FIRST
+    # nothing steadier around: the shaky way is still used
+    assert link.connect_round() and link.host == "192.168.1.200"
+    t[0] += broker_link.STEADY_AFTER
+    _drop_now(c)
+    assert "192.168.1.200" not in link.shaky_for
+    assert link.shaky_for == {} or not link.is_shaky("192.168.1.200")
+
+
+def test_a_name_that_leads_to_a_shaky_address_waits_too():
+    _resolve_everything()          # chatty-node.local -> 192.168.1.50
+    t = [1000.0]
+    c = FakeClient(up={"chatty-node.local", "100.69.130.79"})
+    link = _link(c, clock=lambda: t[0])
+    link.shaky_until["192.168.1.50"] = t[0] + 999
+    assert link.connect_round()
+    assert link.host == "100.69.130.79"
+    assert c.tried == ["chatty-node.local", "100.69.130.79"]
+
+
+def test_moving_home_on_purpose_is_not_a_shaky_drop():
+    _resolve_everything()
+    t = [1000.0]
+    c = FakeClient(up={"100.69.130.79", "192.168.1.200"})
+    link = _link(c, hosts=["nowhere"], clock=lambda: t[0])
+    c.up.discard("192.168.1.200")
+    link.connect_round()
+    assert link.via == "tailscale"
+    c.up.add("192.168.1.200")
+    link.hub.note = {"wifi": "AVC-2G", "lan": ["192.168.1.200"], "known": {}}
+    broker_link.tcp_open = lambda *a, **k: True
+    t[0] += 30
+    link.maybe_follow()
+    assert not link.is_shaky("100.69.130.79") and link.good == "192.168.1.200"
+
+
 if __name__ == "__main__":
     import inspect
     real = (broker_link.tcp_open, broker_link.scan_home, broker_link.socket.getaddrinfo)

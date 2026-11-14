@@ -22,7 +22,13 @@ What it does instead of a single broker address:
   3. Follows her: when it had to go the long way round (Tailscale) and her
      note shows a home address that answers, it moves back to that one
      (checked every 5 minutes). Home addresses keep working without internet.
-  4. Last resort, when nothing on the list answers for a few rounds: knocks
+  4. Remembers shaky ways: a connection that drops within 10 minutes marks
+     that address shaky for 30 minutes (doubling each time, up to 6 hours,
+     forgotten after it holds for an hour). Shaky addresses are tried last and
+     never followed back to. On 2026-11-13 the way across the AVC-2G extender
+     opened fine but dropped every 1-5 minutes, and following her "home" over
+     it every 5 minutes kept the rain node blinking.
+  5. Last resort, when nothing on the list answers for a few rounds: knocks
      on port 1883 of every address on this node's own home network (at most
      every 10 minutes) and keeps one only if Chatty's note shows up there.
 
@@ -63,6 +69,10 @@ FOLLOW_EVERY = 300        # how often to look for a shorter way to her, seconds
 SCAN_AFTER_ROUNDS = 3     # full rounds with no answer before knocking around
 SCAN_GAP = 600            # at most one knock-around per 10 minutes
 SCAN_PROOF_SECONDS = 15   # a knocked-on board must show Chatty's note in this time
+SHAKY_WITHIN = 600        # a connection that drops sooner than this marks its way shaky
+SHAKY_FIRST = 1800        # first time out for a shaky way, seconds (doubles each time)
+SHAKY_MAX = 6 * 3600
+STEADY_AFTER = 3600       # a connection that holds this long clears its way's record
 TAILNET = ipaddress.ip_network("100.64.0.0/10")
 
 
@@ -234,6 +244,10 @@ class BrokerLink:
         self.last_scan = 0.0
         self.last_follow = 0.0
         self.stopped = False
+        self.addr = ""            # the IP address the current host resolved to
+        self.shaky_until: dict = {}   # address or name -> time it may be trusted again
+        self.shaky_for: dict = {}     # address or name -> its current time out, seconds
+        self._moving = False      # a drop we made on purpose (following her home)
         self._wrap()
 
     # ----- which addresses, in what order -----
@@ -252,7 +266,34 @@ class BrokerLink:
         add(self.ts_default)
         for a in self.scanned:
             add(a)
-        return out
+        # shaky ways last: still tried, but only when nothing steadier answers
+        return [a for a in out if not self.is_shaky(a)] + [a for a in out if self.is_shaky(a)]
+
+    # ----- shaky ways -----
+    def is_shaky(self, *names: str) -> bool:
+        now = self.clock()
+        return any(n and self.shaky_until.get(n, 0) > now for n in names)
+
+    def _lost(self) -> None:
+        """The connection just dropped. Was it a shaky way?"""
+        if not self.since:
+            return
+        now = self.clock()
+        held = now - self.since
+        names = list(dict.fromkeys(n for n in (self.host, self.addr) if n))
+        if self._moving:
+            self._moving = False
+        elif held < SHAKY_WITHIN:
+            for n in names:
+                wait = min(SHAKY_MAX, self.shaky_for.get(n, SHAKY_FIRST / 2) * 2)
+                self.shaky_for[n] = wait
+                self.shaky_until[n] = now + wait
+            self.log(f"the way to {self.host} dropped after {int(held)} s; "
+                     f"trying other ways first for {int(self.shaky_for[names[0]] // 60)} min")
+        elif held >= STEADY_AFTER:
+            for n in names:
+                self.shaky_for.pop(n, None)
+        self.since = 0.0
 
     # ----- paho callbacks, wrapped -----
     def _wrap(self) -> None:
@@ -282,6 +323,8 @@ class BrokerLink:
         def on_disconnect(*args):
             was = self.connected
             self.connected = False
+            if was:
+                self._lost()
             if user_disconnect and was:
                 user_disconnect(*args)
 
@@ -310,6 +353,7 @@ class BrokerLink:
         except OSError:
             return False
         self.via = kind_of(addr)
+        self.addr = addr
         try:
             self.client.connect(host, self.port, keepalive=self.keepalive)
             return True
@@ -326,11 +370,18 @@ class BrokerLink:
 
     def connect_round(self) -> bool:
         """Try each address once. True when connected."""
+        steady_left = [h for h in self.candidates() if not self.is_shaky(h)]
         for host in self.candidates():
             if self.stopped:
                 return False
+            steady_left = [h for h in steady_left if h != host]
             self.unproven = host in self.scanned and host not in self.hub.lan_all()
-            if self._try(host) and self._settle():
+            opened = self._try(host)
+            if opened and steady_left and self.is_shaky(self.addr) and not self.is_shaky(host):
+                # a name (chatty-node.local) that leads to a shaky address: try the rest first
+                self._drop()
+                continue
+            if opened and self._settle():
                 return True
             self._drop()
         self.failed_rounds += 1
@@ -361,9 +412,13 @@ class BrokerLink:
             return
         self.last_follow = now
         for a in self.hub.lan_now():
+            if self.is_shaky(a):
+                continue
             if tcp_open(a, self.port):
                 self.log(f"Chatty answers at home again ({a}), moving over")
+                self._moving = True
                 self._drop()
+                self._lost()
                 self.good = a
                 return
 
@@ -386,7 +441,9 @@ class BrokerLink:
                         backoff = min(30.0, backoff * 2)
                     continue
                 if self.client.loop(timeout=1.0) != 0:
-                    self.connected = False
+                    if self.connected:
+                        self.connected = False
+                        self._lost()
                     continue
                 self.check_proof()
                 self.maybe_follow()
