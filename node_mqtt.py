@@ -26,12 +26,18 @@ her Tailscale address, learns which WiFi she's on from her `chatty/hub` note,
 and follows her when she moves. The heartbeat says how it reached her
 ("via": "lan" or "tailscale", "chatty_wifi").
 
+For the login screen (lightning_status.py) the same state is also written once
+a minute (and right after a strike) to a small file in RAM,
+/dev/shm/lightning-node.json, with "mqtt" (linked or not, how, to where). It
+holds no secrets. The file is written even when MQTT is off.
+
 Settings (environment variables, e.g. in ~/.bluesky_env):
     MQTT_HOST        broker address (default chatty-node.local, Chatty's Pi)
     MQTT_PORT        default 1883
     NODE_NAME        default "lightning"
     MQTT_HOSTS, MQTT_TAILSCALE, MQTT_SCAN: see broker_link.py
     LIGHTNING_MQTT=0 turn this off
+    LIGHTNING_STATUS_FILE  default /dev/shm/lightning-node.json ("" = off)
 """
 from __future__ import annotations
 
@@ -47,6 +53,7 @@ PORT = int(os.getenv("MQTT_PORT", "1883"))
 NAME = os.getenv("NODE_NAME", "lightning").strip() or "lightning"
 TITLE = "Lightning node"
 EVERY = 60  # seconds between heartbeats
+STATUS_FILE = os.getenv("LIGHTNING_STATUS_FILE", "/dev/shm/lightning-node.json").strip()
 
 STATUS = f"chatty/nodes/{NAME}/status"
 DATA = f"chatty/nodes/{NAME}/data"
@@ -74,6 +81,29 @@ def data_payload(state: dict[str, Any]) -> str:
     return json.dumps(body)
 
 
+def write_status_file(state: dict[str, Any], mqtt: dict[str, Any],
+                      path: Optional[str] = None) -> bool:
+    """Write the node's state for the login screen. Never raises."""
+    path = STATUS_FILE if path is None else path
+    if not path:
+        return False
+    body = dict(state)
+    body["mqtt"] = mqtt
+    body["ts"] = int(time.time())
+    tmp = f"{path}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(body, f)
+        os.replace(tmp, path)
+        return True
+    except (OSError, TypeError, ValueError):
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
 class CheckIn:
     def __init__(self, state_provider: StateProvider):
         self.state_provider = state_provider
@@ -86,10 +116,13 @@ class CheckIn:
     def _on_connect(self, client, userdata, flags, *rest):
         self.connected = True
         self._publish_all()
+        self._write_local()
 
     def _on_disconnect(self, *args):
         if self.connected:
             print("Node network: lost the broker, retrying", flush=True)
+            self.connected = False
+            self._write_local()
         self.connected = False
 
     def _state(self) -> Optional[dict]:
@@ -98,6 +131,20 @@ class CheckIn:
         except Exception as e:
             print("Node network: couldn't read state:", repr(e), flush=True)
             return None
+
+    def mqtt_info(self) -> dict:
+        if not ENABLED:
+            return {"linked": False, "why": "off"}
+        if self.client is None:
+            return {"linked": False, "why": "not started"}
+        info = self.link.info() if self.link else {}
+        return {"linked": bool(self.connected), "via": info.get("via", ""),
+                "broker": info.get("broker", ""), "chatty_wifi": info.get("chatty_wifi", "")}
+
+    def _write_local(self) -> None:
+        state = self._state()
+        if state is not None:
+            write_status_file(state, self.mqtt_info())
 
     def _publish_all(self) -> None:
         state = self._state()
@@ -127,8 +174,11 @@ class CheckIn:
             self._wake.clear()
             if self.connected:
                 self._publish_all()
+            self._write_local()
 
     def start(self) -> bool:
+        threading.Thread(target=self._loop, name="node-mqtt", daemon=True).start()
+        self.publish_now()  # the login-screen file right away
         if not ENABLED:
             print("Node network: off (LIGHTNING_MQTT=0)", flush=True)
             return False
@@ -142,5 +192,4 @@ class CheckIn:
         import broker_link
         self.link = broker_link.BrokerLink(self.client, port=PORT, keepalive=60)
         self.link.start()
-        threading.Thread(target=self._loop, name="node-mqtt", daemon=True).start()
         return True
