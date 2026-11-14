@@ -31,7 +31,7 @@ def _run(state=None, log_lines=(), services=None, cred=None, env=""):
     ls.TELEMETRY = _tmp("telemetry.jsonl", "".join(json.dumps(x) + "\n" for x in log_lines))
     ls.CREDENTIALS = _tmp("cred.ini", cred) if cred is not None else os.path.join(d, "none.ini")
     ls.ENV_FILE = _tmp("env", env)
-    ls.WIFI_STATUS = _tmp("wifi.json", json.dumps({"ssid": "GF-Home", "signal": 70, "online": True}))
+    ls.WIFI_STATUS = _tmp("wifi.json", json.dumps({"ssid": "HomeWiFi", "signal": 70, "online": True}))
     services = services or {}
     ls.service_state = lambda name: services.get(name, "active")
     ls.mqtt_peer = lambda: None
@@ -49,7 +49,7 @@ def test_missing_sensor_is_shown_gently():
     assert "missing" in out and "check the wires" in out
     assert "0 today" in out and "none yet" in out
     assert "mqtt lan" in out
-    assert "GF-Home 70%" in out
+    assert "HomeWiFi 70%" in out
 
 
 def test_strike_from_state_file():
