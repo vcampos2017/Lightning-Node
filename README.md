@@ -108,6 +108,13 @@ sudo python3 wifi_keeper.py --status        # saved networks and signals
 journalctl -u node-wifi -f                  # what it's doing
 ```
 
+Home WiFi: with `NODE_WIFI_HOME=GF-Home` in `/etc/node-wifi.env`, the node
+prefers the network Chatty and the other nodes are on. On another network with
+home in range at 30%+ (`NODE_WIFI_HOME_MIN`) for 3 checks, it moves home (at most
+every 15 min); if home has no internet it goes straight back and waits longer
+before the next try (30 min, doubling up to 4 h). On home it only leaves below
+30%, and when offline home is tried first.
+
 Settings (all optional) go in `/etc/node-wifi.env`; see the top of `wifi_keeper.py`.
 Tests: `python3 tests/test_wifi_keeper.py`.
 

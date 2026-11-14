@@ -17,6 +17,14 @@ Once a minute it checks that the Pi can really reach the internet (not just
   - Online but on a weak signal, while a saved network nearby is much
     stronger (3 checks in a row): it moves over, and moves back if the new
     one has no internet. At most once every NODE_WIFI_ROAM_MINUTES.
+  - Home WiFi (NODE_WIFI_HOME, e.g. GF-Home): the network Chatty and most
+    of the nodes are on. When it's on another one and home is back in range
+    with a usable signal (3 checks in a row), it moves home, and back if home
+    has no internet; each failed try makes it wait longer before the next
+    (30 min, doubling up to 4 h). On home it only leaves for a stronger
+    network when home itself is very weak (below NODE_WIFI_HOME_MIN), so it
+    doesn't bounce between the two. When nothing has internet, home is
+    tried first.
   - With a network cable plugged in and working, it leaves WiFi alone.
   - At start it turns WiFi power saving off, which makes Pi WiFi drop out.
   - Last resort: offline for NODE_WIFI_REBOOT_MINUTES (30) in a row, and the
@@ -52,6 +60,8 @@ Settings (optional, in /etc/node-wifi.env):
     NODE_WIFI_REBOOTS_PER_DAY       most restarts in 24 hours (default 3)
     NODE_WIFI_CHECK_URLS            comma list of check pages (defaults below)
     NODE_WIFI_AVOID                 comma list of saved network names (SSIDs) never to pick
+    NODE_WIFI_HOME                  the home network's name (SSID); empty = no home
+    NODE_WIFI_HOME_MIN              least home signal percent worth moving back for (default 30)
 
 See what it sees (no changes):    sudo python3 wifi_keeper.py --status
 """
@@ -87,6 +97,9 @@ ROAM_SECONDS = _num("NODE_WIFI_ROAM_MINUTES", 15) * 60
 RESET_AFTER = max(1, int(_num("NODE_WIFI_RESET_AFTER", 3)))
 POWERSAVE_OFF = os.getenv("NODE_WIFI_POWERSAVE", "0") != "1"
 AVOID = {s.strip() for s in os.getenv("NODE_WIFI_AVOID", "").split(",") if s.strip()}
+HOME = os.getenv("NODE_WIFI_HOME", "").strip()
+HOME_MIN = _num("NODE_WIFI_HOME_MIN", 30)
+HOME_BACKOFF_MAX = 4 * 3600     # longest wait between failed tries to go home
 ROAM_CHECKS = 3             # weak checks in a row before moving to a stronger one
 RESCAN_SECONDS = 300        # fresh scan at most this often while things are fine
 RETRY_SECONDS = 300         # after trying everything and failing, wait this long
@@ -477,6 +490,8 @@ class Keeper:
         self.settle = settle
         self.fails = 0
         self.weak = 0
+        self.homeward = 0
+        self.home_misses = 0
         self.bad: Dict[str, float] = {}
         self.last_roam = 0.0
         self.last_scan = 0.0
@@ -637,7 +652,9 @@ class Keeper:
         seen = self.nm.scan(ifname, rescan=True)
         self.last_scan = now
         tried = []
-        for c in candidates(saved, seen, self.bad, now, AVOID):
+        order = candidates(saved, seen, self.bad, now, AVOID)
+        order.sort(key=lambda c: not (c.saved.ssid == HOME and c.signal >= HOME_MIN))
+        for c in order:
             tried.append(c.saved.ssid)
             if self._try(c, ifname):
                 self.fails = 0
@@ -678,7 +695,14 @@ class Keeper:
         here = next((s for s in seen if s.in_use), None)
         sig = here.signal if here else None
         self._save_status(online=True, ssid=current.ssid if current else None, signal=sig)
-        if not ROAM or current is None or sig is None or sig >= WEAK:
+        if ROAM and HOME and current is not None and current.ssid != HOME:
+            went = self._maybe_go_home(now, ifname, saved, seen, current)
+            if went:
+                return went
+        else:
+            self.homeward = 0
+        weak = HOME_MIN if (HOME and current is not None and current.ssid == HOME) else WEAK
+        if not ROAM or current is None or sig is None or sig >= weak:
             self.weak = 0
             return f"online ({sig}%)" if sig is not None else "online"
         others = [c for c in candidates(saved, seen, self.bad, now, AVOID)
@@ -701,6 +725,33 @@ class Keeper:
         self.bad[best.saved.uuid] = now + BAD_SECONDS
         self.nm.up(current.uuid, ifname)
         return f"stayed on {current.ssid}"
+
+    def _maybe_go_home(self, now, ifname, saved, seen, current) -> Optional[str]:
+        """On another network while home is in range with a usable signal:
+        after ROAM_CHECKS checks in a row, move home (and back if it has no
+        internet). Returns what happened, or None to carry on as usual."""
+        home = next((c for c in candidates(saved, seen, self.bad, now, AVOID)
+                     if c.saved.ssid == HOME and c.signal >= HOME_MIN), None)
+        if home is None:
+            self.homeward = 0
+            return None
+        self.homeward += 1
+        if self.homeward < ROAM_CHECKS or now - self.last_roam < ROAM_SECONDS:
+            return f"online on {current.ssid}, home {HOME} is in range ({home.signal}%)"
+        self.homeward = 0
+        self.last_roam = now
+        if self._try(home, ifname):
+            self.home_misses = 0
+            self.notice(f"Moved back to the home WiFi, {HOME}, where Chatty and the other nodes are.")
+            self._save_status(online=True, ssid=HOME, signal=home.signal)
+            return f"moved home to {HOME}"
+        wait = min(BAD_SECONDS * (2 ** self.home_misses), HOME_BACKOFF_MAX)
+        self.home_misses += 1
+        self.bad[home.saved.uuid] = now + wait
+        log(f"Home {HOME} had no internet; going back to {current.ssid}, "
+            f"next try in {wait / 60:.0f} min")
+        self.nm.up(current.uuid, ifname)
+        return f"stayed on {current.ssid}, home has no internet"
 
 
 def show_status(nm) -> None:
@@ -725,6 +776,8 @@ def show_status(nm) -> None:
             flags.append("autoconnect off, skipped")
         if s.ssid in AVOID:
             flags.append("in NODE_WIFI_AVOID, skipped")
+        if HOME and s.ssid == HOME:
+            flags.append("home")
         extra = f"  ({', '.join(flags)})" if flags else ""
         print(f"  {s.ssid:<28} {where}{extra}")
     if not saved:
@@ -766,7 +819,8 @@ def main() -> None:
         nm.powersave_off(dev["device"])
     keeper = Keeper(nm)
     log(f"WiFi keeper started ({nm.kind}): checking every {EVERY:.0f} s"
-        f"{'' if ROAM else ', not roaming to stronger networks'}.")
+        f"{'' if ROAM else ', not roaming to stronger networks'}"
+        f"{f', home WiFi {HOME}' if HOME else ''}.")
     last = None
     while True:
         try:
