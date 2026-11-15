@@ -68,7 +68,7 @@ class FakeAir:
         return bool(self.current and self.internet.get(self.current))
 
 
-SAVED = [("AVC-2G", "u1", "AVC-2G", True),
+SAVED = [("ExtenderWiFi", "u1", "ExtenderWiFi", True),
          ("AVC-5G", "u2", "AVC-5G", True),
          ("Cafe: Guest", "u3", "Cafe: Guest", True)]
 
@@ -87,82 +87,82 @@ def test_split_terse_handles_escaped_colons():
 
 
 def test_stays_put_when_all_is_well():
-    air = FakeAir(SAVED, {"AVC-2G": 70, "AVC-5G": 90}, {"AVC-2G": True, "AVC-5G": True}, "AVC-2G")
+    air = FakeAir(SAVED, {"ExtenderWiFi": 70, "AVC-5G": 90}, {"ExtenderWiFi": True, "AVC-5G": True}, "ExtenderWiFi")
     t = [1000.0]
     k, notices = make(air, t)
     for _ in range(5):
         k.step()
         t[0] += 60
-    assert air.current == "AVC-2G"         # 70% is fine, no hopping around
+    assert air.current == "ExtenderWiFi"         # 70% is fine, no hopping around
     assert not notices
     assert not any("up" in c for c in air.calls)
 
 
 def test_no_internet_moves_to_the_best_working_one():
-    air = FakeAir(SAVED, {"AVC-2G": 80, "AVC-5G": 60, "Cafe: Guest": 75},
-                  {"AVC-2G": False, "AVC-5G": True, "Cafe: Guest": False}, "AVC-2G")
+    air = FakeAir(SAVED, {"ExtenderWiFi": 80, "AVC-5G": 60, "Cafe: Guest": 75},
+                  {"ExtenderWiFi": False, "AVC-5G": True, "Cafe: Guest": False}, "ExtenderWiFi")
     t = [1000.0]
     k, notices = make(air, t)
     assert "1 of" in k.step()               # one miss isn't enough
     t[0] += 60
     assert k.step() == "switched to AVC-5G"  # tried the cafe (stronger) first, then 5G
     assert air.current == "AVC-5G"
-    assert notices == ["Moved to the AVC-5G WiFi: AVC-2G had no internet."]
+    assert notices == ["Moved to the AVC-5G WiFi: ExtenderWiFi had no internet."]
     # The bad one is skipped for a while even though it's strongest.
     assert k.bad["u1"] > t[0]
 
 
 def test_weak_signal_moves_to_a_much_stronger_one():
-    air = FakeAir(SAVED, {"AVC-2G": 25, "AVC-5G": 80}, {"AVC-2G": True, "AVC-5G": True}, "AVC-2G")
+    air = FakeAir(SAVED, {"ExtenderWiFi": 25, "AVC-5G": 80}, {"ExtenderWiFi": True, "AVC-5G": True}, "ExtenderWiFi")
     t = [1000.0]
     k, notices = make(air, t)
     for _ in range(wk.ROAM_CHECKS - 1):
         k.step()
         t[0] += 60
-    assert air.current == "AVC-2G"
+    assert air.current == "ExtenderWiFi"
     assert k.step() == "moved to stronger AVC-5G"
     assert air.current == "AVC-5G"
     assert "stronger" in notices[0]
 
 
 def test_goes_back_if_the_stronger_one_has_no_internet():
-    air = FakeAir(SAVED, {"AVC-2G": 25, "AVC-5G": 80}, {"AVC-2G": True, "AVC-5G": False}, "AVC-2G")
+    air = FakeAir(SAVED, {"ExtenderWiFi": 25, "AVC-5G": 80}, {"ExtenderWiFi": True, "AVC-5G": False}, "ExtenderWiFi")
     t = [1000.0]
     k, notices = make(air, t)
     for _ in range(wk.ROAM_CHECKS):
         r = k.step()
         t[0] += 60
-    assert r == "stayed on AVC-2G"
-    assert air.current == "AVC-2G"
+    assert r == "stayed on ExtenderWiFi"
+    assert air.current == "ExtenderWiFi"
     assert not notices
     for _ in range(10):                      # and doesn't keep trying it
         k.step()
         t[0] += 60
-    assert air.current == "AVC-2G"
+    assert air.current == "ExtenderWiFi"
 
 
 def test_nothing_works_tells_the_face_once_and_reconnects():
-    air = FakeAir(SAVED, {"AVC-2G": 80, "AVC-5G": 60}, {}, "AVC-2G")
+    air = FakeAir(SAVED, {"ExtenderWiFi": 80, "AVC-5G": 60}, {}, "ExtenderWiFi")
     t = [1000.0]
     k, notices = make(air, t)
     k.step()
     t[0] += 60
     assert k.step() == "offline, nothing better found"
-    assert air.current == "AVC-2G"           # back on the usual one
+    assert air.current == "ExtenderWiFi"           # back on the usual one
     assert len(notices) == 1 and "Offline" in notices[0]
     for _ in range(10):
         k.step()
         t[0] += 60
     assert len(notices) == 1                 # not nagging every few minutes
-    air.internet["AVC-2G"] = True            # the router comes back
+    air.internet["ExtenderWiFi"] = True            # the router comes back
     k.step()
-    assert notices[-1] == "Back online on the AVC-2G WiFi."
+    assert notices[-1] == "Back online on the ExtenderWiFi WiFi."
 
 
 def test_skips_avoided_and_autoconnect_off_networks():
     saved = SAVED[:2] + [("Neighbor", "u4", "Neighbor", False)]
-    air = FakeAir(saved, {"AVC-2G": 80, "AVC-5G": 60, "Neighbor": 99},
-                  {"AVC-5G": True, "Neighbor": True}, "AVC-2G")
+    air = FakeAir(saved, {"ExtenderWiFi": 80, "AVC-5G": 60, "Neighbor": 99},
+                  {"AVC-5G": True, "Neighbor": True}, "ExtenderWiFi")
     t = [1000.0]
     k, notices = make(air, t)
     old = wk.AVOID
@@ -173,34 +173,34 @@ def test_skips_avoided_and_autoconnect_off_networks():
         assert k.step() == "offline, no other saved network in range"
     finally:
         wk.AVOID = old
-    assert air.current == "AVC-2G"
+    assert air.current == "ExtenderWiFi"
     assert not any("u4" in c or "u2" in c for c in air.calls if "up" in c)
 
 
 def test_leaves_wifi_alone_on_a_cable():
-    air = FakeAir(SAVED, {"AVC-2G": 10, "AVC-5G": 90}, {"AVC-2G": False}, "AVC-2G")
+    air = FakeAir(SAVED, {"ExtenderWiFi": 10, "AVC-5G": 90}, {"ExtenderWiFi": False}, "ExtenderWiFi")
     air.wired = True
     k, _ = make(air, [1000.0])
     k.online = lambda: True
     for _ in range(5):
         assert k.step() == "on a cable, leaving WiFi alone"
-    assert air.current == "AVC-2G"
+    assert air.current == "ExtenderWiFi"
 
 
 def test_status_file_has_no_secrets():
-    air = FakeAir(SAVED, {"AVC-2G": 70}, {"AVC-2G": True}, "AVC-2G")
+    air = FakeAir(SAVED, {"ExtenderWiFi": 70}, {"ExtenderWiFi": True}, "ExtenderWiFi")
     k, _ = make(air, [1000.0])
     k.step()
     import json
     data = json.load(open(wk.STATUS_FILE))
-    assert data["ssid"] == "AVC-2G" and data["online"] is True and data["signal"] == 70
+    assert data["ssid"] == "ExtenderWiFi" and data["online"] is True and data["signal"] == 70
     assert set(data) == {"online", "ssid", "signal", "ts"}
 
 
 
 
 def test_one_saved_network_still_gets_unstuck():
-    air = FakeAir(SAVED[:1], {"AVC-2G": 70}, {"AVC-2G": False}, "AVC-2G")
+    air = FakeAir(SAVED[:1], {"ExtenderWiFi": 70}, {"ExtenderWiFi": False}, "ExtenderWiFi")
     t = [1000.0]
     k, notices = make(air, t)
     for _ in range(wk.RESET_AFTER * 6):
@@ -241,7 +241,7 @@ class FakeWpa:
             if self.current is not None:
                 s = self.ssid(self.current)
                 out = (f"bssid={self.bssid(s).upper()}\nfreq=2437\nssid={s}\nid={self.current}\n"
-                       "mode=station\nwpa_state=COMPLETED\nip_address=192.168.1.50\n")
+                       "mode=station\nwpa_state=COMPLETED\nip_address=192.168.1.110\n")
             else:
                 out = "wpa_state=SCANNING\n"
         elif args == ["list_networks"]:
@@ -300,45 +300,45 @@ def test_dbm_to_percent():
 
 
 def test_wpa_finds_device_saved_and_signal():
-    air = FakeWpa([("0", "AVC-2G"), ("1", "GF-Home")], {"AVC-2G": -80, "GF-Home": -55},
-                  {"AVC-2G": True}, "0")
+    air = FakeWpa([("0", "ExtenderWiFi"), ("1", "HomeWiFi")], {"ExtenderWiFi": -80, "HomeWiFi": -55},
+                  {"ExtenderWiFi": True}, "0")
     w, k, _ = make_wpa(air, [1000.0], _sysfs())
     assert w.ifname == "wlan0"
-    assert [s.ssid for s in w.saved()] == ["AVC-2G", "GF-Home"]
+    assert [s.ssid for s in w.saved()] == ["ExtenderWiFi", "HomeWiFi"]
     seen = w.scan("wlan0", rescan=True)
-    assert seen[0].ssid == "GF-Home" and seen[0].signal == 90
-    assert next(s for s in seen if s.ssid == "AVC-2G").in_use
+    assert seen[0].ssid == "HomeWiFi" and seen[0].signal == 90
+    assert next(s for s in seen if s.ssid == "ExtenderWiFi").in_use
     assert not w.wired_connected()
-    assert w.wifi_device()["connection"] == "AVC-2G"
+    assert w.wifi_device()["connection"] == "ExtenderWiFi"
 
 
 def test_wpa_no_internet_moves_and_reenables_the_others():
-    air = FakeWpa([("0", "AVC-2G"), ("1", "GF-Home")], {"AVC-2G": -50, "GF-Home": -60},
-                  {"AVC-2G": False, "GF-Home": True}, "0")
+    air = FakeWpa([("0", "ExtenderWiFi"), ("1", "HomeWiFi")], {"ExtenderWiFi": -50, "HomeWiFi": -60},
+                  {"ExtenderWiFi": False, "HomeWiFi": True}, "0")
     t = [1000.0]
     w, k, notices = make_wpa(air, t, _sysfs())
     k.step()
     t[0] += 60
-    assert k.step() == "switched to GF-Home"
+    assert k.step() == "switched to HomeWiFi"
     assert air.current == "1"
     assert air.disabled == set()             # select_network's side effect undone
-    assert notices == ["Moved to the GF-Home WiFi: AVC-2G had no internet."]
+    assert notices == ["Moved to the HomeWiFi WiFi: ExtenderWiFi had no internet."]
 
 
 def test_wpa_weak_signal_roams():
-    air = FakeWpa([("0", "AVC-2G"), ("1", "GF-Home")], {"AVC-2G": -85, "GF-Home": -50},
-                  {"AVC-2G": True, "GF-Home": True}, "0")
+    air = FakeWpa([("0", "ExtenderWiFi"), ("1", "HomeWiFi")], {"ExtenderWiFi": -85, "HomeWiFi": -50},
+                  {"ExtenderWiFi": True, "HomeWiFi": True}, "0")
     t = [1000.0]
     w, k, notices = make_wpa(air, t, _sysfs())
     for _ in range(wk.ROAM_CHECKS):
         r = k.step()
         t[0] += 60
-    assert r == "moved to stronger GF-Home"
+    assert r == "moved to stronger HomeWiFi"
     assert air.current == "1"
 
 
 def test_wpa_cable_leaves_wifi_alone():
-    air = FakeWpa([("0", "AVC-2G")], {"AVC-2G": -90}, {}, "0")
+    air = FakeWpa([("0", "ExtenderWiFi")], {"ExtenderWiFi": -90}, {}, "0")
     w, k, _ = make_wpa(air, [1000.0], _sysfs("1"))
     k.online = lambda: True
     assert k.step() == "on a cable, leaving WiFi alone"
@@ -355,8 +355,8 @@ def test_never_touches_password_files():
 
     builtins.open = spy
     try:
-        air = FakeWpa([("0", "AVC-2G"), ("1", "GF-Home")], {"AVC-2G": -50, "GF-Home": -60},
-                      {"GF-Home": True}, "0")
+        air = FakeWpa([("0", "ExtenderWiFi"), ("1", "HomeWiFi")], {"ExtenderWiFi": -50, "HomeWiFi": -60},
+                      {"HomeWiFi": True}, "0")
         t = [1000.0]
         w, k, _ = make_wpa(air, t, _sysfs())
         for _ in range(4):
@@ -378,7 +378,7 @@ def _fresh_reboots():
 
 def test_restarts_after_long_offline_when_router_is_gone():
     _fresh_reboots()
-    air = FakeAir(SAVED[:1], {"AVC-2G": 70}, {}, "AVC-2G")
+    air = FakeAir(SAVED[:1], {"ExtenderWiFi": 70}, {}, "ExtenderWiFi")
     t = [1000.0]
     k, _ = make(air, t)
     results = []
@@ -390,12 +390,12 @@ def test_restarts_after_long_offline_when_router_is_gone():
     assert len(REBOOTS) == 1                         # then waits another 30 min
     with open(wk.RESTART_LOG) as f:
         entry = f.read().splitlines()[-1]
-    assert "offline 30 min" in entry and "wlan0" in entry and "AVC-2G" in entry
+    assert "offline 30 min" in entry and "wlan0" in entry and "ExtenderWiFi" in entry
 
 
 def test_never_restarts_more_than_the_daily_cap():
     _fresh_reboots()
-    air = FakeAir(SAVED[:1], {"AVC-2G": 70}, {}, "AVC-2G")
+    air = FakeAir(SAVED[:1], {"ExtenderWiFi": 70}, {}, "ExtenderWiFi")
     t = [1000.0]
     for _ in range(6):                                # six "boots" in a row
         k, _ = make(air, t)                           # a new process each boot
@@ -413,7 +413,7 @@ def test_never_restarts_more_than_the_daily_cap():
 
 def test_no_restart_when_only_the_internet_is_down():
     _fresh_reboots()
-    air = FakeAir(SAVED[:1], {"AVC-2G": 70}, {}, "AVC-2G")
+    air = FakeAir(SAVED[:1], {"ExtenderWiFi": 70}, {}, "ExtenderWiFi")
     t = [1000.0]
     k, _ = make(air, t)
     k.router = lambda: True                           # router answers: ISP outage
@@ -426,11 +426,11 @@ def test_no_restart_when_only_the_internet_is_down():
 
 def test_no_restart_when_internet_comes_back():
     _fresh_reboots()
-    air = FakeAir(SAVED[:1], {"AVC-2G": 70}, {}, "AVC-2G")
+    air = FakeAir(SAVED[:1], {"ExtenderWiFi": 70}, {}, "ExtenderWiFi")
     t = [1000.0]
     k, _ = make(air, t)
     for i in range(60):
-        air.internet["AVC-2G"] = (i % 20 == 19)       # back for a minute every 20
+        air.internet["ExtenderWiFi"] = (i % 20 == 19)       # back for a minute every 20
         k.step()
         t[0] += 60
     assert not REBOOTS
@@ -438,7 +438,7 @@ def test_no_restart_when_internet_comes_back():
 
 def test_restart_when_wifi_chip_vanishes():
     _fresh_reboots()
-    air = FakeAir(SAVED[:1], {"AVC-2G": 70}, {}, None)
+    air = FakeAir(SAVED[:1], {"ExtenderWiFi": 70}, {}, None)
     t = [1000.0]
     k, _ = make(air, t)
     k.nm.wifi_device = lambda: None
@@ -473,97 +473,97 @@ class home:
         wk.HOME = self.old
 
 
-HOME_SAVED = [("GF-Home", "h1", "GF-Home", True), ("AVC-2G", "u1", "AVC-2G", True)]
+HOME_SAVED = [("HomeWiFi", "h1", "HomeWiFi", True), ("ExtenderWiFi", "u1", "ExtenderWiFi", True)]
 
 
 def test_moves_back_home_when_home_is_usable():
-    air = FakeAir(HOME_SAVED, {"GF-Home": 55, "AVC-2G": 80},
-                  {"GF-Home": True, "AVC-2G": True}, "AVC-2G")
+    air = FakeAir(HOME_SAVED, {"HomeWiFi": 55, "ExtenderWiFi": 80},
+                  {"HomeWiFi": True, "ExtenderWiFi": True}, "ExtenderWiFi")
     t = [10000.0]
     k, notices = make(air, t)
-    with home("GF-Home"):
+    with home("HomeWiFi"):
         for _ in range(wk.ROAM_CHECKS - 1):
-            assert "home GF-Home is in range" in k.step()
+            assert "home HomeWiFi is in range" in k.step()
             t[0] += 60
-        assert air.current == "AVC-2G"           # not on the first glimpse
-        assert k.step() == "moved home to GF-Home"
-        assert air.current == "GF-Home"
-        assert "home WiFi, GF-Home" in notices[0]
-        for _ in range(30):                      # and stays, though AVC-2G is stronger
+        assert air.current == "ExtenderWiFi"           # not on the first glimpse
+        assert k.step() == "moved home to HomeWiFi"
+        assert air.current == "HomeWiFi"
+        assert "home WiFi, HomeWiFi" in notices[0]
+        for _ in range(30):                      # and stays, though ExtenderWiFi is stronger
             k.step()
             t[0] += 60
-    assert air.current == "GF-Home"
+    assert air.current == "HomeWiFi"
     assert len(notices) == 1
 
 
 def test_home_too_weak_is_left_alone():
-    air = FakeAir(HOME_SAVED, {"GF-Home": 20, "AVC-2G": 80},
-                  {"GF-Home": True, "AVC-2G": True}, "AVC-2G")
+    air = FakeAir(HOME_SAVED, {"HomeWiFi": 20, "ExtenderWiFi": 80},
+                  {"HomeWiFi": True, "ExtenderWiFi": True}, "ExtenderWiFi")
     t = [10000.0]
     k, notices = make(air, t)
-    with home("GF-Home"):
+    with home("HomeWiFi"):
         for _ in range(10):
             k.step()
             t[0] += 60
-    assert air.current == "AVC-2G" and not notices
+    assert air.current == "ExtenderWiFi" and not notices
 
 
 def test_home_without_internet_backs_off():
-    air = FakeAir(HOME_SAVED, {"GF-Home": 60, "AVC-2G": 80},
-                  {"GF-Home": False, "AVC-2G": True}, "AVC-2G")
+    air = FakeAir(HOME_SAVED, {"HomeWiFi": 60, "ExtenderWiFi": 80},
+                  {"HomeWiFi": False, "ExtenderWiFi": True}, "ExtenderWiFi")
     t = [10000.0]
     k, notices = make(air, t)
     tries = []
-    with home("GF-Home"):
+    with home("HomeWiFi"):
         for minute in range(6 * 60):
             r = k.step()
-            if r.startswith("stayed on AVC-2G"):
+            if r.startswith("stayed on ExtenderWiFi"):
                 tries.append(minute)
             t[0] += 60
-    assert air.current == "AVC-2G" and not notices
+    assert air.current == "ExtenderWiFi" and not notices
     gaps = [b - a for a, b in zip(tries, tries[1:])]
     assert len(tries) >= 3 and gaps == sorted(gaps) and gaps[-1] > gaps[0]
 
 
 def test_on_home_only_very_weak_signal_moves_it():
-    air = FakeAir(HOME_SAVED, {"GF-Home": 35, "AVC-2G": 90},
-                  {"GF-Home": True, "AVC-2G": True}, "GF-Home")
+    air = FakeAir(HOME_SAVED, {"HomeWiFi": 35, "ExtenderWiFi": 90},
+                  {"HomeWiFi": True, "ExtenderWiFi": True}, "HomeWiFi")
     t = [10000.0]
     k, notices = make(air, t)
-    with home("GF-Home"):
+    with home("HomeWiFi"):
         for _ in range(10):                      # 35% is weak, but fine for home
             k.step()
             t[0] += 60
-        assert air.current == "GF-Home"
-        air.signals["GF-Home"] = 15              # really bad now
+        assert air.current == "HomeWiFi"
+        air.signals["HomeWiFi"] = 15              # really bad now
         for _ in range(wk.ROAM_CHECKS):
             r = k.step()
             t[0] += 60
-    assert r == "moved to stronger AVC-2G"
+    assert r == "moved to stronger ExtenderWiFi"
 
 
 def test_offline_tries_home_first():
     saved = HOME_SAVED + [("AVC-5G", "u2", "AVC-5G", True)]
-    air = FakeAir(saved, {"GF-Home": 50, "AVC-2G": 70, "AVC-5G": 90},
-                  {"GF-Home": True, "AVC-2G": False, "AVC-5G": True}, "AVC-2G")
+    air = FakeAir(saved, {"HomeWiFi": 50, "ExtenderWiFi": 70, "AVC-5G": 90},
+                  {"HomeWiFi": True, "ExtenderWiFi": False, "AVC-5G": True}, "ExtenderWiFi")
     t = [10000.0]
     k, notices = make(air, t)
-    with home("GF-Home"):
+    with home("HomeWiFi"):
         k.step()
         t[0] += 60
-        assert k.step() == "switched to GF-Home"
+        assert k.step() == "switched to HomeWiFi"
 
 
 def test_wpa_moves_back_home():
-    air = FakeWpa([("0", "AVC-2G"), ("1", "GF-Home")], {"AVC-2G": -50, "GF-Home": -70},
-                  {"AVC-2G": True, "GF-Home": True}, "0")
+    air = FakeWpa([("0", "ExtenderWiFi"), ("1", "HomeWiFi")], {"ExtenderWiFi": -50, "HomeWiFi": -70},
+                  {"ExtenderWiFi": True, "HomeWiFi": True}, "0")
     t = [10000.0]
     w, k, notices = make_wpa(air, t, _sysfs())
-    with home("GF-Home"):
+    with home("HomeWiFi"):
         for _ in range(wk.ROAM_CHECKS):
             r = k.step()
             t[0] += 60
-    assert r == "moved home to GF-Home"
+    assert r == "moved home to HomeWiFi"
     assert air.current == "1" and air.disabled == set()
 
 

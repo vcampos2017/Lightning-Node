@@ -17,7 +17,7 @@ Once a minute it checks that the Pi can really reach the internet (not just
   - Online but on a weak signal, while a saved network nearby is much
     stronger (3 checks in a row): it moves over, and moves back if the new
     one has no internet. At most once every NODE_WIFI_ROAM_MINUTES.
-  - Home WiFi (NODE_WIFI_HOME, e.g. GF-Home): the network Chatty and most
+  - Home WiFi (NODE_WIFI_HOME, e.g. HomeWiFi): the network Chatty and most
     of the nodes are on. When it's on another one and home is back in range
     with a usable signal (3 checks in a row), it moves home, and back if home
     has no internet; each failed try makes it wait longer before the next
