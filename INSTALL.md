@@ -32,6 +32,14 @@ The node keeps running with the sensor unplugged. It reports `sensor: missing`
 to Chatty and picks the sensor back up within a minute once it answers again.
 Tuning settings for noisy spots are in `lightning.env.example`.
 
+A planned reboot, shutdown or `systemctl restart lightning-bluesky` says
+goodbye to Chatty first (`node_goodbye.py`, the same file in every node's repo),
+so she waits quietly for the node to come back instead of saying it went quiet
+(10 minutes after a reboot, an hour after a power-down). Before a longer
+power-down, `python3 node_goodbye.py away 180` asks her to wait 3 hours. Once
+per Pi, `sudo python3 node_goodbye.py install lightning-bluesky` makes the
+service stop before the network at shutdown, so the goodbye still gets out.
+
 ## 2. Enable I²C
 
 ```bash

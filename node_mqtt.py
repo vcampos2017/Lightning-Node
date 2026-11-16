@@ -18,6 +18,13 @@ Both topics are retained. If the Pi drops off WiFi or the service stops, the
 broker posts {"state": "offline"} for it (the last will) and Chatty shows
 "Lightning node went quiet".
 
+A planned reboot, shutdown or service restart is different: node_goodbye.py
+posts a proper goodbye first ({"state": "offline", "clean": true, "reason":
+"reboot", ...}) and leaves without the last will, so Chatty waits quietly for
+the node to come back instead of saying it went quiet.
+`python3 node_goodbye.py away 180` before a long power-down asks her to wait
+3 hours.
+
 If paho-mqtt is missing or the broker can't be reached, lightning detection
 and Bluesky posting carry on as before.
 
@@ -192,4 +199,17 @@ class CheckIn:
         import broker_link
         self.link = broker_link.BrokerLink(self.client, port=PORT, keepalive=60)
         self.link.start()
+        import node_goodbye
+        node_goodbye.on_stop(self.goodbye)   # SIGTERM (reboot, shutdown, restart)
         return True
+
+    def goodbye(self) -> bool:
+        """Shutting down or restarting properly: tell Chatty (no last will)."""
+        if self.client is None or self.link is None:
+            return False
+        import node_goodbye
+        ok = node_goodbye.leave(self.client, STATUS, node_goodbye.message(TITLE, EVERY),
+                                link=self.link)
+        self.connected = False
+        self._write_local()
+        return ok
