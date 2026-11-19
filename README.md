@@ -85,6 +85,21 @@ Tests: `python3 tests/test_lightning_status.py`
 
 ---
 
+## 🔁 Never stuck off the node network
+
+It never stays stuck (2026-11-19, after the lightning node said "can't reach Chatty" for
+two days and a plain restart fixed it): each "can't reach Chatty" line says why the last
+try failed, and when the problem is on the node's side (the program ran out of open files,
+or a brand-new program reaches her board while this one hasn't for 15 minutes,
+`MQTT_RESTART_MINUTES`) it ends itself so systemd starts it fresh. Once per Pi,
+`sudo python3 broker_link.py install lightning-bluesky` adds a systemd drop-in: always restart, and a
+watchdog that restarts the service if the link thread hangs. `python3 broker_link.py check`
+asks her board for a hello from a fresh program.
+
+The cause that time: every retry for the unplugged AS3935 left the I2C bus file open, one
+per minute, until the program had none left (about 17 hours). `lightning_bluesky.py` now
+closes it.
+
 ## 📶 WiFi keeper
 
 `wifi_keeper.py` keeps the node on the best saved WiFi that really reaches the

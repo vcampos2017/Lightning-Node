@@ -619,9 +619,23 @@ def _set_bits(s, register: int, mask: int, value: int) -> None:
 _SENSOR_WARNED = False
 
 
+def close_sensor(s) -> None:
+    """Close the sensor's I2C bus file. smbus2 never closes it on its own, so
+    every retry while the sensor was unplugged used to leave one open file
+    behind; after about 17 hours the program had none left and couldn't reach
+    Chatty any more (2026-11-16 to 11-18)."""
+    bus = getattr(s, "i2cbus", None)
+    try:
+        if bus is not None:
+            bus.close()
+    except Exception:
+        pass
+
+
 def connect_sensor():
     """Open and configure the AS3935. Returns None if it doesn't answer."""
     global _SENSOR_WARNED
+    s = None
     try:
         s = LightningSensor(address=AS3935_ADDRESS, bus=1)
         s.read_data()
@@ -633,6 +647,7 @@ def connect_sensor():
         _set_bits(s, 0x02, 0x0F, AS3935_SPIKE_REJECT)  # SREJ
         s.set_mask_disturber(AS3935_MASK_DISTURBERS)
     except Exception as e:
+        close_sensor(s)
         if _SENSOR_WARNED:
             return None  # already said so; keep the log quiet while it's unplugged
         _SENSOR_WARNED = True
@@ -974,6 +989,7 @@ def main_loop():
                 read_errors += 1
                 if read_errors >= SENSOR_MAX_ERRORS:
                     warn(f"AS3935 stopped answering ({e!r}); marking it missing.", context="sensor")
+                    close_sensor(sensor)
                     sensor = None
                     last_sensor_try = time.monotonic()
                     read_errors = 0
