@@ -42,7 +42,7 @@ Settings (environment variables, e.g. in ~/.bluesky_env):
     MQTT_HOST        broker address (default chatty-node.local, Chatty's Pi)
     MQTT_PORT        default 1883
     NODE_NAME        default "lightning"
-    MQTT_HOSTS, MQTT_TAILSCALE, MQTT_SCAN: see broker_link.py
+    MQTT_HOSTS, MQTT_TAILSCALE, MQTT_SCAN, MQTT_RESTART_MINUTES: see broker_link.py
     LIGHTNING_MQTT=0 turn this off
     LIGHTNING_STATUS_FILE  default /dev/shm/lightning-node.json ("" = off)
 """
